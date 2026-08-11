@@ -42,6 +42,13 @@ def data_preprocessing_skempi(path):
     df['Temp_K'] = df['Temperature'].astype(str).str.extract(r'(\d+)').astype(float) # Convert to float
     df['Temp_K'] = df['Temp_K'].fillna(298.0) # Fill the missing values with 298.0 K (standard temperature)
     
+    # Check if the columns Affinity_mut (M) and Affinity_wt (M) have missing values
+    if df['Affinity_mut (M)'].isna().any() or df['Affinity_wt (M)'].isna().any():
+        print("~~~ Warning: Missing values found in the Affinity_mut (M) and Affinity_wt (M) columns.")
+        df = df[df['Affinity_mut (M)'].notna() & df['Affinity_wt (M)'].notna()]
+    else:
+        print("~~~ No missing values detected in Affinity_mut (M) or Affinity_wt (M).")
+    
     # Ensure the affinity columns are numeric
     affinity_mut = pd.to_numeric(df['Affinity_mut (M)'], errors='coerce')
     affinity_wt = pd.to_numeric(df['Affinity_wt (M)'], errors='coerce')
