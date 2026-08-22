@@ -219,3 +219,5 @@ __marimo__/
 
 # Additional files or folders
 .vscode/
+data/
+pyrightconfig.json
