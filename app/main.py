@@ -1,4 +1,5 @@
-import os
+import io
+import requests
 import pandas as pd
 import streamlit as st
 
@@ -17,6 +18,20 @@ from utils import (
     plot_ddg_distribution,
     plot_pdb_counts
 )
+
+# SKEMPI url (example)
+SKEMPI_URL = "https://life.bsc.es/pid/skempi2/database/download/skempi_v2.csv"
+
+# Cache the web download so it doesn't re-fetch on every button click
+@st.cache_data(show_spinner="Downloading SKEMPI v2 dataset from URL...")
+def load_skempi_from_url(url: str) -> pd.DataFrame:
+  # Using a custom User-Agent header helps avoid server blocks
+  headers = {"User-Agent": "Mozilla/5.0"}
+  response = requests.get(url, headers=headers, timeout=15)
+  response.raise_for_status()
+
+  # Read CSV directly from memory buffer
+  return pd.read_csv(io.StringIO(response.text), sep=None, engine="python")
 
 # Config
 st.set_page_config(page_title="BioData Pipeline & 3D Viewer", page_icon="🧬", layout="wide")
@@ -50,29 +65,64 @@ if 'welcome_seen' not in st.session_state:
 
 
 # --- SIDEBAR ---
-st.sidebar.title("Data & Column Configuration")
+st.sidebar.title("Data Source")
 
-# Section to upload a file (max 200 MB)
-uploaded_file = st.sidebar.file_uploader("Upload Dataset (.csv)", type=["csv"])
+# Option to choose upload mode
+data_source = st.sidebar.radio(
+    "Choose data source:",
+    ("Fetch SKEMPI v2 from web", "Upload Custom Local CSV"),
+)
 
-if uploaded_file:
-    try:
-        df_raw = pd.read_csv(uploaded_file, sep=None, engine='python')
-    except Exception:
-        # Fallback to comma if auto-sniffing fails
-        uploaded_file.seek(0)
-        df_raw = pd.read_csv(uploaded_file, sep=',')
+df_raw = None
+
+# Set hardcoded column defaults when loading SKEMPI
+if data_source == "Fetch SKEMPI v2 from web":
+    if st.sidebar.button("Load Dataset from URL"):
+        try:
+            df_raw = load_skempi_from_url(SKEMPI_URL)
+            st.sidebar.success("SKEMPI v2 fetched successfully from web!")
+
+            # Auto-fill hardcoded column parameters for SKEMPI v2
+            st.session_state["default_col_pdb"] = "#Pdb"
+            st.session_state["default_col_mut"] = "Mutation(s)_PDB"
+            st.session_state["default_col_aff_wt"] = "Affinity_wt_parsed"
+            st.session_state["default_col_aff_mut"] = "Affinity_mut_parsed"
+            st.session_state["default_col_temp"] = "Temperature"
+        except Exception as e:
+            st.sidebar.error(f"Failed to fetch dataset from URL: {e}")
+else:
+    # Reset the defaults to empty strings when in Custom CSV mode
+    st.session_state["default_col_pdb"] = ""
+    st.session_state["default_col_mut"] = ""
+    st.session_state["default_col_aff_wt"] = ""
+    st.session_state["default_col_aff_mut"] = ""
+    st.session_state["default_col_temp"] = ""
+
+    uploaded_file = st.sidebar.file_uploader(
+        "Upload your CSV dataset", type=["csv"]
+    )
     
+    if uploaded_file is not None:
+        try:
+            df_raw = pd.read_csv(uploaded_file, sep=None, engine="python")
+        except Exception:
+            uploaded_file.seek(0)
+            df_raw = pd.read_csv(uploaded_file, sep=",")
+
+
+if df_raw is not None:
+    st.write("Data loaded successfully! Total rows:", len(df_raw))
+
     # Form to add the information needed for the execution
     with st.sidebar.form(key="pipeline_config_form"):
         # Column information
-        st.info("Enter the column names for the needed columns.")
+        st.info("Enter or verify the column names for execution.")
 
-        col_pdb = st.text_input("PDB Column:")
-        col_mut = st.text_input("Mutation Column:")
-        col_aff_wt = st.text_input("Wild-Type Affinity Column (Numeric Float):")
-        col_aff_mut = st.text_input("Mutant Affinity Column (Numeric Float):")
-        col_temp = st.text_input("Temperature Column:")
+        col_pdb = st.text_input("PDB Column:", value=st.session_state.get("default_col_pdb"))
+        col_mut = st.text_input("Mutation Column:", value=st.session_state.get("default_col_mut"))
+        col_aff_wt = st.text_input("Wild-Type Affinity Column (Numeric Float):", value=st.session_state.get("default_col_aff_wt"))
+        col_aff_mut = st.text_input("Mutant Affinity Column (Numeric Float):", value=st.session_state.get("default_col_aff_mut"))
+        col_temp = st.text_input("Temperature Column:", value=st.session_state.get("default_col_temp"))
         check_temp = st.selectbox("Temperature scale used:", options=["Kelvin (K)", "Celsius (C)", "Fahrenheit (F)"])
         
         st.divider()
@@ -99,19 +149,20 @@ if uploaded_file:
                 # Preprocessing data
                 df_preprocessed = data_preprocessing(
                     df_raw=df_raw,
-                    col_aff_wt=col_aff_wt,
-                    col_aff_mut=col_aff_mut,
-                    col_temp=col_temp,
+                    col_aff_wt=col_aff_wt,  # pyright: ignore[reportArgumentType]
+                    col_aff_mut=col_aff_mut,  # pyright: ignore[reportArgumentType]
+                    col_temp=col_temp,  # pyright: ignore[reportArgumentType]
                     check_temp=check_temp
                 )
 
                 # QC analysis
                 df_qc = quality_control(
                     df_preprocessed,
-                    col_pdb=col_pdb,
-                    col_mutation=col_mut,
+                    col_pdb=col_pdb,  # pyright: ignore[reportArgumentType]
+                    col_mutation=col_mut,  # pyright: ignore[reportArgumentType]
                     z_threshold=z_thresh,
-                    contamination_rate=iso_contam
+                    contamination_rate=iso_contam,
+                    mad_floor = mad_floor
                 )
 
                 df_qc['PDB_ID'] = df_qc[col_pdb].astype(str).str[:4].str.upper()
@@ -128,7 +179,11 @@ if uploaded_file:
             st.error(f"Column error: Missing column {ke}. Please check your sidebar dropdown selections.")
         except Exception as e:
             st.error(f"Error processing dataset: {str(e)}")
-
+else:
+    st.info(
+        "Please upload a CSV dataset or click 'Load Dataset from URL' in the"
+        " sidebar to get started. In the second case, the **SKEMPI v2.0** dataset will be used."
+    )
 
 # --- DISPLAY DASHBOARD ---
 if 'df_qc' in st.session_state:
@@ -288,6 +343,3 @@ if 'df_qc' in st.session_state:
 
         else:
             st.warning("No valid 4-character PDB IDs found in the dataset.")
-else:
-    if not uploaded_file:
-        st.info("Please upload a CSV dataset in the sidebar to get started.")
