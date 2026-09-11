@@ -1,5 +1,3 @@
-import os
-import re
 import numpy as np
 import pandas as pd
 import scipy.constants as const
@@ -16,20 +14,34 @@ def data_preprocessing(
     """
     Cleans raw uploaded dataframe, parses temperature, ensures affinity columns 
     are float values, and calculates thermodynamic ddG (kcal/mol).
+    Rows with no parseable temperature get the default value and are marked
+    in a 'temp_assumed' boolean column (read later by quality_control).
     
     Parameters:
         df_raw: Raw input DataFrame.
         col_aff_mut: Mandatory numeric/float column for mutant affinity (e.g., Kd_mut in M).
         col_aff_wt: Mandatory numeric/float column for wild-type affinity (e.g., Kd_wt in M).
         col_temp: Column name for temperature.
-        check_temp: Slidebox that indicates the temperature scale used.
+        check_temp: Selectbox value that indicates the temperature scale used.
         default_temp: Fallback temperature in Kelvin if missing or unparseable.
+    
+    Returns:
+        pd.DataFrame
+            DataFrame with all the preprocessed data (new temperature column, ddG calculated, etc.)
     """
     df = df_raw.copy()
     df.columns = df.columns.str.strip()
     
     # Temperature treatment
-    df['Temperature'] = df[col_temp].astype(str).str.extract(r'(\d+)').astype(float)
+    temp_str = df[col_temp].astype(str)
+    temp_extracted = temp_str.str.extract(r'(-?\d+(?:\.\d+)?)', expand=False)
+    df['Temperature'] = pd.to_numeric(temp_extracted, errors='coerce')
+
+    df['temp_assumed'] = (
+        df['Temperature'].isna()
+        | temp_str.str.contains('assumed', case=False, na=False)
+    )
+
     df['Temperature'] = df['Temperature'].fillna(default_temp)
     
     if check_temp == "Kelvin (K)":
@@ -44,13 +56,12 @@ def data_preprocessing(
     if col_aff_mut in df.columns:
         df[col_aff_mut] = pd.to_numeric(df[col_aff_mut], errors='coerce')
     else:
-        raise ValueError(f"Column '{col_aff_wt}' not found in dataframe")
+        raise ValueError(f"Mutant affinity column '{col_aff_mut}' not found in dataframe")
     
     if col_aff_wt in df.columns:
         df[col_aff_wt] = pd.to_numeric(df[col_aff_wt], errors='coerce')
     else:
-        raise ValueError(f"Column '{col_aff_mut}' not found in dataframe")
-    
+        raise ValueError(f"Wild-type affinity column '{col_aff_wt}' not found in dataframe")
     
     # Drop rows with non-numeric, missing, or non-positive (<= 0) affinity values
     df = df.dropna(subset=[col_aff_mut, col_aff_wt]).copy()
@@ -70,7 +81,6 @@ def quality_control(
     df_preprocessed: pd.DataFrame,
     col_pdb: str = '#Pdb',
     col_mutation: str = 'Mutation(s)_PDB',
-    col_temp: str = 'Temperature',
     z_threshold: float = 3.5,
     contamination_rate: float = 0.03,
     replicate_std_threshold: float = 1.5,
@@ -82,13 +92,12 @@ def quality_control(
     
     Parameters:
         df_preprocessed : pd.DataFrame
-            Input dataframe with calculated thermodynamic metrics.
+            Input dataframe with calculated thermodynamic metrics, as returned
+            by data_preprocessing (which adds the 'temp_assumed' flag column).
         col_pdb : str
             Column name for PDB structure IDs.
         col_mutation : str
             Column name for mutation strings.
-        col_temp : str
-            Column name for temperature data.
         z_threshold : float
             Cutoff for absolute robust Z-score flagging.
         contamination_rate : float
@@ -140,8 +149,8 @@ def quality_control(
     df['QC_Flag'] = 'PASS'
     df['QC_Reason'] = 'Clean data with metrics within normal ranges'
 
-    if col_temp in df.columns:
-        mask_assumed_temp = df[col_temp].astype(str).str.contains('assumed', case=False, na=False)
+    if 'temp_assumed' in df.columns:
+        mask_assumed_temp = df['temp_assumed']
         df.loc[mask_assumed_temp, 'QC_Flag'] = 'REVIEW'
         df.loc[mask_assumed_temp, 'QC_Reason'] = 'Default temperature used'
 

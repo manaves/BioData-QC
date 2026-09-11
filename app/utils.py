@@ -29,7 +29,66 @@ AMINO_ACIDS = {
     'V': {'name': 'Valine', 'class': 'Nonpolar', 'mw': 117.15}
 }
 
+def _pdb_atom_stats(pdb_block: str):
+    """
+    Scan ATOM/HETATM records for the ranges needed by gradient colorschemes.
+
+    3Dmol does not infer gradient domains, so we compute them from the file:
+    B-factor = columns 61-66, residue number = columns 23-26 (PDB format).
+    Returns (bf_min, bf_max, resi_min, resi_max).
+    """
+    bfactors, resnums = [], []
+    for line in pdb_block.splitlines():
+        if line.startswith(("ATOM", "HETATM")) and len(line) >= 66:
+            try:
+                bfactors.append(float(line[60:66]))
+            except ValueError:
+                pass
+        if line.startswith("ATOM") and len(line) >= 26:
+            try:
+                resnums.append(int(line[22:26]))
+            except ValueError:
+                pass
+            
+    if not bfactors:
+        bf_min, bf_max = 0.0, 100.0
+    else:
+        bf_min, bf_max = min(bfactors), max(bfactors)
+        if bf_min == bf_max:  # Avoid a zero-width gradient domain
+            bf_min, bf_max = bf_min - 1.0, bf_max + 1.0
+    if not resnums:
+        resi_min, resi_max = 1, 100
+    else:
+        resi_min, resi_max = min(resnums), max(resnums)
+        if resi_min == resi_max:
+            resi_min, resi_max = resi_min - 1, resi_max + 1
+    
+    return bf_min, bf_max, resi_min, resi_max
+
+def _build_scheme_spec(color_scheme: str, pdb_block: str):
+    """
+    Return the 3Dmol colorscheme spec for the scheme chosen in the UI.
+
+    Gradient schemes use the object form {prop, gradient, min, max}, which has
+    been supported by 3Dmol.js for many years ('b' = B-factor, 'resi' =
+    residue number). 'chain' and 'ssJmol' are plain scheme-name strings.
+    """
+    if color_scheme == "B-Factor":
+        bf_min, bf_max, _, _ = _pdb_atom_stats(pdb_block)
+        return {'prop': 'b', 'gradient': 'roygb', 'min': bf_min, 'max': bf_max}
+    if color_scheme == "N-to-C Spectrum":
+        # 'resi' restarts on every chain, so each chain sweeps the gradient
+        # from its own N-terminus to its own C-terminus.
+        _, _, resi_min, resi_max = _pdb_atom_stats(pdb_block)
+        return {'prop': 'resi', 'gradient': 'roygb', 'min': resi_min, 'max': resi_max}
+    if color_scheme == "Secondary Structure":
+        return 'ssJmol' #'ssPyMOL'
+    return 'chain'
+
 def fetch_pdb_from_web(pdb_id: str):
+    """
+    Fetch PDB structure from RSCB DB.
+    """
     clean_id = str(pdb_id).strip().upper()[:4]
     rcsb_url = f"https://files.rcsb.org/download/{clean_id}.pdb"
     try:
@@ -99,27 +158,22 @@ def render_wt_structure_highlight(
         canvas_bg = '#ffffff' if bg_color == "White" else '#111111'
         view.setBackgroundColor(canvas_bg)
 
-        # Main color scheme
-        color_map = {
-            "Chain ID": "chain",
-            "Secondary Structure": "ssPyMOL",
-            "N-to-C Spectrum": "spectrum",
-            "B-Factor": "bfactor"
-        }
-        selected_color = color_map.get(color_scheme, "chain")
+        scheme_spec = _build_scheme_spec(color_scheme, pdb_block)
 
-        # Global representation
         if style_type == "Cartoon":
-            view.setStyle({}, {'cartoon': {'color': selected_color, 'opacity': 0.85}})
+            view.setStyle({}, {'cartoon': {'colorscheme': scheme_spec, 'opacity': 0.85}})
         elif style_type == "Spheres":
-            view.setStyle({}, {'sphere': {'color': selected_color, 'scale': 0.5}})
+            view.setStyle({}, {'sphere': {'colorscheme': scheme_spec, 'scale': 0.5}})
         elif style_type == "Sticks":
-            view.setStyle({}, {'stick': {'colorscheme': 'chainCarbon', 'radius': 0.2}})
+            view.setStyle({}, {'stick': {'colorscheme': scheme_spec, 'radius': 0.2}})
         elif style_type == "Ribbon Trace":
-            view.setStyle({}, {'line': {'color': selected_color, 'linewidth': 3}})
+            view.setStyle({}, {'line': {'colorscheme': scheme_spec, 'linewidth': 3}})
 
+        # FIX: white-on-white was invisible. A translucent gray contrasts with
+        # both canvas colors, so toggling the checkbox now has a visible effect.
         if show_surface:
-            view.addSurface(py3Dmol.VDW, {'opacity': 0.35, 'color': 'white' if bg_color == "Dark" else 'gray'})
+            surface_color = '#909090' if bg_color == "White" else '#3d3d3d'
+            view.addSurface(py3Dmol.VDW, {'opacity': 0.45, 'color': surface_color})
 
         view.addStyle({'hetflag': True}, {'stick': {'radius': 0.15}})
 
@@ -137,15 +191,15 @@ def render_wt_structure_highlight(
                     res_spec['icode'] = m['inscode']
 
                 # --- NEIGHBORHOOD SELECTION ---
+                neighbor_spec = None
                 if show_neighbors:
                     neighbor_spec = {
                         'within': {
                             'distance': neighbor_radius,
                             'sel': res_spec,
-                            'byres': True  # Select whole residues, not just individual atoms
+                            'byres': True
                         }
                     }
-                    # Render neighbors as semi-transparent (sticks & spheres)
                     view.addStyle(neighbor_spec, {
                         'stick': {
                             'color': neighbor_color,
@@ -159,10 +213,11 @@ def render_wt_structure_highlight(
                         }
                     })
 
-                # --- MUTATED RESIDUE HIGHLIGHT (Overrides neighbor style) ---
-                if mut_repr in ["Sticks & Spheres", "Sticks only"]:
+                # --- MUTATED RESIDUE HIGHLIGHT ---
+                mut_repr_l = str(mut_repr).lower()
+                if mut_repr_l in ("sticks & spheres", "sticks only"):
                     view.addStyle(res_spec, {'stick': {'color': highlight_color, 'radius': 0.45}})
-                if mut_repr in ["Sticks & Spheres", "Spheres only"]:
+                if mut_repr_l in ("sticks & spheres", "spheres only"):
                     view.addStyle(res_spec, {'sphere': {'color': highlight_color, 'opacity': 0.85, 'radius': 1.3}})
 
                 # Residue label
@@ -177,8 +232,7 @@ def render_wt_structure_highlight(
                 )
                 
                 if not has_valid_target:
-                    # Zoom in closely to show local contacts if neighbors are enabled
-                    zoom_spec = neighbor_spec if show_neighbors else res_spec  # pyright: ignore[reportPossiblyUnboundVariable]
+                    zoom_spec = neighbor_spec if (show_neighbors and neighbor_spec is not None) else res_spec
                     view.zoomTo(zoom_spec)
                     has_valid_target = True
 
@@ -429,16 +483,23 @@ def plot_aa_transition_matrix(df: pd.DataFrame, col_mut: str) -> go.Figure:
         plotly.graph_objects.Figure
             A Plotly heatmap showing frequency of residue conversions from WT to Mutant.
     """
-    wt_aa = df[col_mut].astype(str).str[0]
-    mut_aa = df[col_mut].astype(str).str[-1]
     
-    ct = pd.crosstab(wt_aa, mut_aa)
-    
-    fig = px.imshow(
+    pairs = []
+    for s in df[col_mut].dropna().astype(str):
+        for m in parse_mutation_info(s):
+            pairs.append((m['wt_code'], m['mut_code']))
+
+    if not pairs:
+        return px.scatter(title="No parseable mutations found")
+
+    wt_series = pd.Series([p[0] for p in pairs], name="Wild-Type Amino Acid")
+    mut_series = pd.Series([p[1] for p in pairs], name="Mutant Amino Acid")
+    ct = pd.crosstab(wt_series, mut_series)
+
+    return px.imshow(
         ct,
         labels=dict(x="Mutant Amino Acid", y="Wild-Type Amino Acid", color="Count"),
         title="Amino Acid Substitution Matrix",
         color_continuous_scale="Blues",
         text_auto=True
     )
-    return fig

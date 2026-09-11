@@ -1,4 +1,5 @@
 import io
+import math
 import requests
 import pandas as pd
 import streamlit as st
@@ -22,6 +23,41 @@ from utils import (
 # SKEMPI url (example)
 SKEMPI_URL = "https://life.bsc.es/pid/skempi2/database/download/skempi_v2.csv"
 
+# Hardcoded SKEMPI v2 column mapping.
+# The keys match the `key=` of the column selectboxes in the sidebar form.
+SKEMPI_COLUMNS = {
+    "sel_pdb": "#Pdb",
+    "sel_mut": "Mutation(s)_PDB",
+    "sel_aff_wt": "Affinity_wt_parsed",
+    "sel_aff_mut": "Affinity_mut_parsed",
+    "sel_temp": "Temperature",
+}
+
+# Default QC parameters: used both as slider defaults and for the example auto-run.
+DEFAULT_QC_PARAMS = {
+    "z_thresh": 3.5,
+    "iso_contam": 0.03,
+    "mad_floor": 0.000001,
+}
+
+# Rows per page in the processed-dataset table
+PAGE_SIZE = 10
+
+# Shared instructions text: shown in the "Get started" card AND in the sidebar expander.
+INSTRUCTIONS_MD = """
+**Quick Instructions:**
+- Load the **SKEMPI v2** example dataset or upload your own CSV to get started.
+- Select column mappings and QC parameter thresholds in the sidebar.
+- Click **Run Pipeline** to compute thermodynamic properties and generate interactive 3D visualizations.
+
+**Important - Expected Column Meanings**
+1. **PDB Column**: The PDB entry for the complex, followed by the chain identifiers for the two subunits (e.g., `1JTG_A_B`).
+2. **Mutation Column**: Contains mutation designations. Format: `<WT_AA><Chain><ResNum><Mut_AA>` (e.g., `EA104A`). Multiple mutations are comma-separated.
+3. **Wild-Type Affinity Column**: Equilibrium dissociation constant ($K_d$) of the wild-type protein.
+4. **Mutant Affinity Column**: Equilibrium dissociation constant ($K_d$) of the mutant protein.
+5. **Temperature Column**: Experimental temperature ($K$, $^\circ C$, or $^\circ F$).
+"""
+
 # Cache the web download so it doesn't re-fetch on every button click
 @st.cache_data(show_spinner="Downloading SKEMPI v2 dataset from URL...")
 def load_skempi_from_url(url: str) -> pd.DataFrame:
@@ -36,154 +72,244 @@ def load_skempi_from_url(url: str) -> pd.DataFrame:
 # Config
 st.set_page_config(page_title="BioData Pipeline & 3D Viewer", page_icon="🧬", layout="wide")
 
-# Pop-up dialog
-@st.dialog("👋 Welcome to BioData-QC")
-def show_welcome_popup():
-    st.write("""
-        Welcome to the **BioData Quality Control & 3D Viewer** application!
-        
-        **Quick Instructions:**
-        - Upload your CSV dataset using the sidebar menu.
-        - Select column mappings and QC parameter thresholds.
-        - Click **Run Pipeline** to compute thermodynamic properties and generate interactive 3D visualizations.
-        
-        **IMPORTANT - COLUMNS MEANING**
-        1. **PDB Column**: The PDB entry for the complex, followed by the chain identifiers for the two subunits.
-        2. **Mutation Column**: Column with the mutations. The format must be: The first character is the one letter amino acid code for the original residue, the second character is the chain identifier, the third to penultimate characters indicate the residue number, followed by the residue insertion code where applicable, and the final character indicates the mutant amino acid. Where multiple mutations are present, they are separated by commas.
-        3. **Wild-Type Affinity Column**: The affinity of the wild-type form. It must be a numeric float.
-        4. **Mutant Affinity Column**: The affinity of the mutant form. It must be a numeric float.
-        5. **Temperature Column**: The temperature column of the experiment. You must select in the select box the scale used.
-    """)
-    
-    if st.button("Get Started", type="primary", use_container_width=True):
-        st.session_state['welcome_seen'] = True
-        st.rerun()
-
-# Trigger pop-up on first load
-if 'welcome_seen' not in st.session_state:
-    show_welcome_popup()
+# --- Session state initialization ---
+if "df_raw" not in st.session_state:
+    st.session_state["df_raw"] = None
+if "data_mode" not in st.session_state:
+    st.session_state["data_mode"] = None  # None | "example" | "upload"
+if "auto_run" not in st.session_state:
+    st.session_state["auto_run"] = False
 
 
-# --- SIDEBAR ---
-st.sidebar.title("Data Source")
+# --- Helpers ---
+def clear_results():
+    """Remove previous pipeline results (and table pagination) from session state."""
+    for key in ("df_qc", "col_mut", "col_aff_wt", "col_aff_mut", "dataset_page"):
+        st.session_state.pop(key, None)
 
-# Option to choose upload mode
-data_source = st.sidebar.radio(
-    "Choose data source:",
-    ("Fetch SKEMPI v2 from web", "Upload Custom Local CSV"),
-)
 
-df_raw = None
+def read_csv_file(file) -> pd.DataFrame:
+    """Read an uploaded CSV with automatic separator detection (with fallback)."""
+    try:
+        return pd.read_csv(file, sep=None, engine="python")
+    except Exception:
+        file.seek(0)
+        return pd.read_csv(file, sep=",")
 
-# Set hardcoded column defaults when loading SKEMPI
-if data_source == "Fetch SKEMPI v2 from web":
-    if st.sidebar.button("Load Dataset from URL"):
-        try:
-            df_raw = load_skempi_from_url(SKEMPI_URL)
-            st.sidebar.success("SKEMPI v2 fetched successfully from web!")
 
-            # Auto-fill hardcoded column parameters for SKEMPI v2
-            st.session_state["default_col_pdb"] = "#Pdb"
-            st.session_state["default_col_mut"] = "Mutation(s)_PDB"
-            st.session_state["default_col_aff_wt"] = "Affinity_wt_parsed"
-            st.session_state["default_col_aff_mut"] = "Affinity_mut_parsed"
-            st.session_state["default_col_temp"] = "Temperature"
-        except Exception as e:
-            st.sidebar.error(f"Failed to fetch dataset from URL: {e}")
-else:
-    # Reset the defaults to empty strings when in Custom CSV mode
-    st.session_state["default_col_pdb"] = ""
-    st.session_state["default_col_mut"] = ""
-    st.session_state["default_col_aff_wt"] = ""
-    st.session_state["default_col_aff_mut"] = ""
-    st.session_state["default_col_temp"] = ""
+def load_example_dataset():
+    """Fetch SKEMPI v2, auto-map its columns and trigger the automatic run."""
+    try:
+        df = load_skempi_from_url(SKEMPI_URL)
+    except Exception as e:
+        st.error(f"Failed to fetch dataset from URL: {e}")
+        return
 
-    uploaded_file = st.sidebar.file_uploader(
-        "Upload your CSV dataset", type=["csv"]
+    st.session_state["df_raw"] = df
+    st.session_state["data_mode"] = "example"
+
+    for sel_key, col_name in SKEMPI_COLUMNS.items():
+        st.session_state.pop(sel_key, None)  # clear any stale mapping
+        if col_name in df.columns:
+            st.session_state[sel_key] = col_name
+
+    clear_results()
+    st.session_state["auto_run"] = True
+    st.rerun()
+
+
+def run_pipeline(df_raw, col_pdb, col_mut, col_aff_wt, col_aff_mut, col_temp,
+                 check_temp, z_thresh, iso_contam, mad_floor):
+    """Preprocessing + QC + storing results in session state."""
+    try:
+        with st.spinner("Processing thermodynamic calculations and running QC..."):
+            # Preprocessing data
+            df_preprocessed = data_preprocessing(
+                df_raw=df_raw,
+                col_aff_wt=col_aff_wt,
+                col_aff_mut=col_aff_mut,
+                col_temp=col_temp,
+                check_temp=check_temp
+            )
+
+            # QC analysis
+            df_qc = quality_control(
+                df_preprocessed,
+                col_pdb=col_pdb,
+                col_mutation=col_mut,
+                z_threshold=z_thresh,
+                contamination_rate=iso_contam,
+                mad_floor=mad_floor
+            )
+            
+            df_qc = df_qc.reset_index(drop=True)
+            df_qc['PDB_ID'] = df_qc[col_pdb].astype(str).str[:4].str.upper()
+
+            # Store all required column variables in session state
+            st.session_state['df_qc'] = df_qc
+            st.session_state['col_mut'] = col_mut
+            st.session_state['col_aff_wt'] = col_aff_wt
+            st.session_state['col_aff_mut'] = col_aff_mut
+
+            # New results -> jump back to the first page of the table
+            st.session_state.pop("dataset_page", None)
+
+        st.success(f"Successfully processed {len(df_raw):,} records!")
+
+    except KeyError as ke:
+        st.error(f"Column error: Missing column {ke}. Please check your sidebar dropdown selections.")
+    except Exception as e:
+        st.error(f"Error processing dataset: {str(e)}")
+
+
+# --- "GET STARTED" SCREEN (only while no dataset is loaded) ---
+if st.session_state["df_raw"] is None:
+
+    st.title("👋 Welcome to BioData-QC")
+
+    with st.container(border=True):
+        st.subheader("Get started")
+        st.markdown("""
+            Welcome to the **BioData Quality Control & 3D Viewer** application!
+
+            This application processes thermodynamic protein binding data, executes outlier detection pipelines, 
+            and renders 3D macromolecular structures.
+        """)
+        st.markdown(INSTRUCTIONS_MD)
+
+        col_btn1, col_btn2 = st.columns(2)
+
+        with col_btn1:
+            if st.button("Load example dataset (SKEMPI v2)", type="primary", width="stretch"):
+                load_example_dataset()
+
+        with col_btn2:
+            if st.button("Upload local CSV", width="stretch"):
+                st.session_state["data_mode"] = "upload"
+                st.rerun()
+
+    if st.session_state["data_mode"] == "upload":
+        uploaded_file = st.file_uploader("Upload your CSV dataset", type=["csv"])
+
+        if uploaded_file is not None:
+            try:
+                st.session_state["df_raw"] = read_csv_file(uploaded_file)
+                st.session_state["data_mode"] = "upload"
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not read the CSV file: {e}")
+
+    st.stop()
+
+
+# --- DATASET LOADED ---
+df_raw = st.session_state["df_raw"]
+st.write("Data loaded successfully! Total rows (before processing):", len(df_raw))
+
+# --- SIDEBAR: DATA SOURCE ---
+with st.sidebar:
+    st.title("Data Source")
+
+    new_file = st.file_uploader(
+        "Upload a new CSV (replaces the current dataset)",
+        type=["csv"],
+        key="sidebar_uploader",
     )
+
+    if new_file is None:
+        # Uploader emptied: forget the previous file so a re-upload is detected
+        st.session_state.pop("uploaded_sig", None)
+    else:
+        # A file_uploader keeps its file across reruns, so we only process it
+        # when it differs from the one already loaded.
+        file_sig = (getattr(new_file, "file_id", None), new_file.name, new_file.size)
+        if st.session_state.get("uploaded_sig") != file_sig:
+            try:
+                df = read_csv_file(new_file)
+                st.session_state["df_raw"] = df
+                st.session_state["data_mode"] = "upload"
+                st.session_state["uploaded_sig"] = file_sig
+
+                # Reset the column mapping (keep entries whose name still exists)
+                for sel_key in SKEMPI_COLUMNS:
+                    if st.session_state.get(sel_key) not in df.columns:
+                        st.session_state.pop(sel_key, None)
+
+                clear_results()
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not read the CSV file: {e}")
+
+    if st.button("Load SKEMPI v2 example", width="stretch"):
+        load_example_dataset()
+
+    # Instructions & column meanings, available at any time
+    with st.expander("Instructions & column meanings"):
+        st.markdown(INSTRUCTIONS_MD)
+
+    st.title("Pipeline Configuration")
+
+# Form to add the information needed for the execution
+with st.sidebar.form(key="pipeline_config_form"):
+    # Column information
+    st.info("Select or verify the column mappings for execution.")
+
+    column_options = df_raw.columns.tolist()
+
+    col_pdb = st.selectbox("PDB Column:", options=column_options, key="sel_pdb")
+    col_mut = st.selectbox("Mutation Column:", options=column_options, key="sel_mut")
+    col_aff_wt = st.selectbox("Wild-Type Affinity Column (Numeric Float):", options=column_options, key="sel_aff_wt")
+    col_aff_mut = st.selectbox("Mutant Affinity Column (Numeric Float):", options=column_options, key="sel_aff_mut")
+    col_temp = st.selectbox("Temperature Column:", options=column_options, key="sel_temp")
+    check_temp = st.selectbox("Temperature scale used:", options=["Kelvin (K)", "Celsius (C)", "Fahrenheit (F)"])
+
+    st.divider()
     
-    if uploaded_file is not None:
-        try:
-            df_raw = pd.read_csv(uploaded_file, sep=None, engine="python")
-        except Exception:
-            uploaded_file.seek(0)
-            df_raw = pd.read_csv(uploaded_file, sep=",")
+    # QC information
+    st.subheader("QC Parameters")
+    z_thresh = st.slider("Robust Z-Score Cutoff:", 1.5, 5.0, DEFAULT_QC_PARAMS["z_thresh"], 0.1)
+    iso_contam = st.slider("Isolation Forest Contamination:", 0.01, 0.15, DEFAULT_QC_PARAMS["iso_contam"], 0.01)
 
-
-if df_raw is not None:
-    st.write("Data loaded successfully! Total rows:", len(df_raw))
-
-    # Form to add the information needed for the execution
-    with st.sidebar.form(key="pipeline_config_form"):
-        # Column information
-        st.info("Enter or verify the column names for execution.")
-
-        col_pdb = st.text_input("PDB Column:", value=st.session_state.get("default_col_pdb"))
-        col_mut = st.text_input("Mutation Column:", value=st.session_state.get("default_col_mut"))
-        col_aff_wt = st.text_input("Wild-Type Affinity Column (Numeric Float):", value=st.session_state.get("default_col_aff_wt"))
-        col_aff_mut = st.text_input("Mutant Affinity Column (Numeric Float):", value=st.session_state.get("default_col_aff_mut"))
-        col_temp = st.text_input("Temperature Column:", value=st.session_state.get("default_col_temp"))
-        check_temp = st.selectbox("Temperature scale used:", options=["Kelvin (K)", "Celsius (C)", "Fahrenheit (F)"])
-        
-        st.divider()
-        # QC information
-        st.subheader("QC Parameters")
-        z_thresh = st.slider("Robust Z-Score Cutoff:", 1.5, 5.0, 3.5, 0.1)
-        iso_contam = st.slider("Isolation Forest Contamination:", 0.01, 0.15, 0.03, 0.01)
-        
-        mad_floor = st.slider(
-            "MAD Floor (Min Variance Cutoff):",
-            min_value=0.000001,
-            max_value=0.1,
-            value=0.000001,
-            step=0.0005,
-            format="scientific",
-            help="Minimum allowable Median Absolute Deviation (MAD) value. Prevents division by zero and extreme Z-scores for groups with near-zero variance."
-        )
-
-        submit_button = st.form_submit_button(label="Run Pipeline", width='content')
-
-    if submit_button:
-        try:
-            with st.spinner("Processing thermodynamic calculations and running QC..."):
-                # Preprocessing data
-                df_preprocessed = data_preprocessing(
-                    df_raw=df_raw,
-                    col_aff_wt=col_aff_wt,  # pyright: ignore[reportArgumentType]
-                    col_aff_mut=col_aff_mut,  # pyright: ignore[reportArgumentType]
-                    col_temp=col_temp,  # pyright: ignore[reportArgumentType]
-                    check_temp=check_temp
-                )
-
-                # QC analysis
-                df_qc = quality_control(
-                    df_preprocessed,
-                    col_pdb=col_pdb,  # pyright: ignore[reportArgumentType]
-                    col_mutation=col_mut,  # pyright: ignore[reportArgumentType]
-                    z_threshold=z_thresh,
-                    contamination_rate=iso_contam,
-                    mad_floor = mad_floor
-                )
-
-                df_qc['PDB_ID'] = df_qc[col_pdb].astype(str).str[:4].str.upper()
-
-                # Store all required column variables in session state
-                st.session_state['df_qc'] = df_qc
-                st.session_state['col_mut'] = col_mut
-                st.session_state['col_aff_wt'] = col_aff_wt
-                st.session_state['col_aff_mut'] = col_aff_mut
-
-            st.success(f"Successfully processed {len(df_qc):,} records!")
-
-        except KeyError as ke:
-            st.error(f"Column error: Missing column {ke}. Please check your sidebar dropdown selections.")
-        except Exception as e:
-            st.error(f"Error processing dataset: {str(e)}")
-else:
-    st.info(
-        "Please upload a CSV dataset or click 'Load Dataset from URL' in the"
-        " sidebar to get started. In the second case, the **SKEMPI v2.0** dataset will be used."
+    mad_floor = st.slider(
+        "MAD Floor (Min Variance Cutoff):",
+        min_value=0.000001,
+        max_value=0.1,
+        value=DEFAULT_QC_PARAMS["mad_floor"],
+        step=0.0005,
+        format="scientific",
+        help="Minimum allowable Median Absolute Deviation (MAD) value. Prevents division by zero and extreme Z-scores for groups with near-zero variance."
     )
+
+    submit_button = st.form_submit_button(label="Run Pipeline", width='content')
+
+if submit_button:
+    run_pipeline(df_raw, col_pdb, col_mut, col_aff_wt, col_aff_mut,
+                 col_temp, check_temp, z_thresh, iso_contam, mad_floor)
+
+# --- Automatic run for the example dataset (default QC parameters) ---
+if st.session_state.get("auto_run"):
+    st.session_state["auto_run"] = False  # Consume the flag: run only once
+
+    status_ph = st.empty()
+    status_ph.info("SKEMPI v2 example loaded: running the pipeline with the default QC parameters...")
+
+    run_pipeline(
+        df_raw,
+        col_pdb=col_pdb,
+        col_mut=col_mut,
+        col_aff_wt=col_aff_wt,
+        col_aff_mut=col_aff_mut,
+        col_temp=col_temp,
+        check_temp="Kelvin (K)",
+        z_thresh=DEFAULT_QC_PARAMS["z_thresh"],
+        iso_contam=DEFAULT_QC_PARAMS["iso_contam"],
+        mad_floor=DEFAULT_QC_PARAMS["mad_floor"],
+    )
+
+    status_ph.empty()  # The message disappears as soon as the run finishes
+
+if "df_qc" not in st.session_state:
+    st.info("Select the column mappings and QC parameters in the sidebar, then press **Run Pipeline**.")
 
 # --- DISPLAY DASHBOARD ---
 if 'df_qc' in st.session_state:
@@ -198,8 +324,16 @@ if 'df_qc' in st.session_state:
     # Processed dataset
     with tab1:
         st.subheader("Processed Dataset")
-        st.dataframe(df_qc, width='stretch')
-        
+
+        # --- Paginated table ---
+        total_rows = len(df_qc)
+        page_count = max(1, math.ceil(total_rows / PAGE_SIZE))
+        page = st.pagination(page_count, key="dataset_page")  # Pages are 1-indexed
+        start = (page - 1) * PAGE_SIZE
+        end = min(start + PAGE_SIZE, total_rows)
+        st.caption(f"Showing rows {start + 1:,}–{end:,} of {total_rows:,} · page {page} of {page_count}")
+        st.dataframe(df_qc.iloc[start:end], width='stretch')
+
         st.divider()
 
         # Organized 2-Column Grid Layout for Charts
