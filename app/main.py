@@ -57,21 +57,6 @@ CALCULATED_COLS = [
     "QC_Reason",            # Human-readable QC reason
 ]
 
-# Shared instructions text: shown in the "Get started" card AND in the sidebar expander.
-INSTRUCTIONS_MD = """
-**Quick Instructions:**
-- Load the **SKEMPI v2** example dataset or upload your own CSV to get started.
-- Select column mappings and QC parameter thresholds in the sidebar.
-- Click **Run Pipeline** to compute thermodynamic properties and generate interactive 3D visualizations.
-
-**Important - Expected Column Meanings**
-1. **PDB Column**: The PDB entry for the complex, followed by the chain identifiers for the two subunits (e.g., `1JTG_A_B`).
-2. **Mutation Column**: Contains mutation designations. Format: `<WT_AA><Chain><ResNum><Mut_AA>` (e.g., `EA104A`). Multiple mutations are comma-separated.
-3. **Wild-Type Affinity Column**: Equilibrium dissociation constant ($K_d$) of the wild-type protein.
-4. **Mutant Affinity Column**: Equilibrium dissociation constant ($K_d$) of the mutant protein.
-5. **Temperature Column**: Experimental temperature ($K$, $^\circ C$, or $^\circ F$).
-"""
-
 # Cache the web download so it doesn't re-fetch on every button click
 @st.cache_data(show_spinner="Downloading SKEMPI v2 dataset from URL...")
 def load_skempi_from_url(url: str) -> pd.DataFrame:
@@ -85,6 +70,14 @@ def load_skempi_from_url(url: str) -> pd.DataFrame:
 
 # Config
 st.set_page_config(page_title="BioData Pipeline & 3D Viewer", page_icon="🧬", layout="wide")
+
+LOGO_PATH = "app/logo/logo.png"
+
+st.logo(
+    LOGO_PATH,
+    size="large",
+    icon_image=LOGO_PATH
+)
 
 # --- Session state initialization ---
 if "df_raw" not in st.session_state:
@@ -181,8 +174,7 @@ def run_pipeline(df_raw, col_pdb, col_mut, col_aff_wt, col_aff_mut, col_temp,
 
 # --- "GET STARTED" SCREEN (only while no dataset is loaded) ---
 if st.session_state["df_raw"] is None:
-
-    st.title("👋 Welcome to BioData-QC")
+    st.title("👋 Welcome to BioData")
 
     with st.container(border=True):
         st.subheader("Get started")
@@ -191,8 +183,19 @@ if st.session_state["df_raw"] is None:
 
             This application processes thermodynamic protein binding data, executes outlier detection pipelines, 
             and renders 3D macromolecular structures.
+            
+            **Quick Instructions:**
+            - Load the **SKEMPI v2** example dataset or upload your own CSV to get started.
+            - Select column mappings and QC parameter thresholds in the sidebar.
+            - Click **Run Pipeline** to compute thermodynamic properties and generate interactive 3D visualizations.
+
+            **Important - Expected Column Meanings**
+            1. **PDB Column**: The PDB entry for the complex, followed by the chain identifiers for the two subunits (e.g., `1JTG_A_B`).
+            2. **Mutation Column**: Contains mutation designations. Format: `<WT_AA><Chain><ResNum><Mut_AA>` (e.g., `EA104A`). Multiple mutations are comma-separated.
+            3. **Wild-Type Affinity Column**: Equilibrium dissociation constant ($K_d$) of the wild-type protein.
+            4. **Mutant Affinity Column**: Equilibrium dissociation constant ($K_d$) of the mutant protein.
+            5. **Temperature Column**: Experimental temperature ($K$, $^\circ C$, or $^\circ F$).
         """)
-        st.markdown(INSTRUCTIONS_MD)
 
         col_btn1, col_btn2 = st.columns(2)
 
@@ -265,8 +268,12 @@ with st.sidebar:
         load_example_dataset()
 
     # Instructions & column meanings, available at any time
-    with st.expander("Instructions & column meanings"):
-        st.markdown(INSTRUCTIONS_MD)
+    with st.expander("Instructions"):
+        st.markdown("""
+            - Load the **SKEMPI v2** example dataset or upload your own CSV to get started.
+            - Select column mappings and QC parameter thresholds in the sidebar.
+            - Click **Run Pipeline** to compute thermodynamic properties and generate interactive 3D visualizations.                    
+        """)
 
     st.title("Pipeline Configuration")
 
@@ -278,15 +285,20 @@ with st.sidebar.form(key="pipeline_config_form"):
     column_options = df_raw.columns.tolist()
 
     col_pdb = st.selectbox("PDB Column:", options=column_options, key="sel_pdb",
-                          index=None, placeholder="Select a column...")
+                            index=None, placeholder="Select a column...",
+                            help="The PDB entry for the complex, followed by the chain identifiers for the two subunits (e.g., `1JTG_A_B`).")
     col_mut = st.selectbox("Mutation Column:", options=column_options, key="sel_mut",
-                           index=None, placeholder="Select a column...")
+                            index=None, placeholder="Select a column...",
+                            help="Contains mutation designations. Format: `<WT_AA><Chain><ResNum><Mut_AA>` (e.g., `EA104A`). Multiple mutations are comma-separated.")
     col_aff_wt = st.selectbox("Wild-Type Affinity Column (Numeric Float):", options=column_options,
-                              key="sel_aff_wt", index=None, placeholder="Select a column...")
+                                key="sel_aff_wt", index=None, placeholder="Select a column...",
+                                help="Equilibrium dissociation constant ($K_d$) of the wild-type protein.")
     col_aff_mut = st.selectbox("Mutant Affinity Column (Numeric Float):", options=column_options,
-                               key="sel_aff_mut", index=None, placeholder="Select a column...")
+                                key="sel_aff_mut", index=None, placeholder="Select a column...",
+                                help="Equilibrium dissociation constant ($K_d$) of the mutant protein.")
     col_temp = st.selectbox("Temperature Column:", options=column_options, key="sel_temp",
-                            index=None, placeholder="Select a column...")
+                                index=None, placeholder="Select a column...",
+                                help="Experimental temperature ($K$, $^\circ C$, or $^\circ F$).")
     check_temp = st.selectbox("Temperature scale used:", options=["Kelvin (K)", "Celsius (C)", "Fahrenheit (F)"])
 
     st.divider()
