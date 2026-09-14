@@ -43,6 +43,20 @@ DEFAULT_QC_PARAMS = {
 # Rows per page in the processed-dataset table
 PAGE_SIZE = 10
 
+# Columns created by the pipeline (preprocessing + QC). Shown next to the 5
+# sidebar-selected columns in the processed-dataset table.
+CALCULATED_COLS = [
+    "Temperature",          # Numeric temperature parsed from the selected Temperature column
+    "Temp_K",               # Temperature converted to Kelvin
+    "ddG_kcal_mol",         # Calculated binding free-energy change
+    "PDB_ID",               # 4-character PDB code extracted from the PDB column
+    "z_score",              # Robust Z-score (grouped by PDB)
+    "iso_forest_outlier",   # Isolation Forest outlier flag
+    "std_replicates",       # Std-dev of ddG across replicates
+    "QC_Flag",              # QC pass/review/anomaly/reject flag
+    "QC_Reason",            # Human-readable QC reason
+]
+
 # Shared instructions text: shown in the "Get started" card AND in the sidebar expander.
 INSTRUCTIONS_MD = """
 **Quick Instructions:**
@@ -84,7 +98,8 @@ if "auto_run" not in st.session_state:
 # --- Helpers ---
 def clear_results():
     """Remove previous pipeline results (and table pagination) from session state."""
-    for key in ("df_qc", "col_mut", "col_aff_wt", "col_aff_mut", "dataset_page"):
+    for key in ("df_qc", "col_pdb", "col_mut", "col_aff_wt", "col_aff_mut",
+                "col_temp", "dataset_page"):
         st.session_state.pop(key, None)
 
 
@@ -147,9 +162,11 @@ def run_pipeline(df_raw, col_pdb, col_mut, col_aff_wt, col_aff_mut, col_temp,
 
             # Store all required column variables in session state
             st.session_state['df_qc'] = df_qc
+            st.session_state['col_pdb'] = col_pdb
             st.session_state['col_mut'] = col_mut
             st.session_state['col_aff_wt'] = col_aff_wt
             st.session_state['col_aff_mut'] = col_aff_mut
+            st.session_state['col_temp'] = col_temp
 
             # New results -> jump back to the first page of the table
             st.session_state.pop("dataset_page", None)
@@ -195,6 +212,11 @@ if st.session_state["df_raw"] is None:
             try:
                 st.session_state["df_raw"] = read_csv_file(uploaded_file)
                 st.session_state["data_mode"] = "upload"
+
+                for sel_key in SKEMPI_COLUMNS:
+                    st.session_state.pop(sel_key, None)
+                clear_results()
+                
                 st.rerun()
             except Exception as e:
                 st.error(f"Could not read the CSV file: {e}")
@@ -230,10 +252,9 @@ with st.sidebar:
                 st.session_state["data_mode"] = "upload"
                 st.session_state["uploaded_sig"] = file_sig
 
-                # Reset the column mapping (keep entries whose name still exists)
+                # Reset the column mapping 
                 for sel_key in SKEMPI_COLUMNS:
-                    if st.session_state.get(sel_key) not in df.columns:
-                        st.session_state.pop(sel_key, None)
+                    st.session_state[sel_key] = None
 
                 clear_results()
                 st.rerun()
@@ -256,11 +277,16 @@ with st.sidebar.form(key="pipeline_config_form"):
 
     column_options = df_raw.columns.tolist()
 
-    col_pdb = st.selectbox("PDB Column:", options=column_options, key="sel_pdb")
-    col_mut = st.selectbox("Mutation Column:", options=column_options, key="sel_mut")
-    col_aff_wt = st.selectbox("Wild-Type Affinity Column (Numeric Float):", options=column_options, key="sel_aff_wt")
-    col_aff_mut = st.selectbox("Mutant Affinity Column (Numeric Float):", options=column_options, key="sel_aff_mut")
-    col_temp = st.selectbox("Temperature Column:", options=column_options, key="sel_temp")
+    col_pdb = st.selectbox("PDB Column:", options=column_options, key="sel_pdb",
+                          index=None, placeholder="Select a column...")
+    col_mut = st.selectbox("Mutation Column:", options=column_options, key="sel_mut",
+                           index=None, placeholder="Select a column...")
+    col_aff_wt = st.selectbox("Wild-Type Affinity Column (Numeric Float):", options=column_options,
+                              key="sel_aff_wt", index=None, placeholder="Select a column...")
+    col_aff_mut = st.selectbox("Mutant Affinity Column (Numeric Float):", options=column_options,
+                               key="sel_aff_mut", index=None, placeholder="Select a column...")
+    col_temp = st.selectbox("Temperature Column:", options=column_options, key="sel_temp",
+                            index=None, placeholder="Select a column...")
     check_temp = st.selectbox("Temperature scale used:", options=["Kelvin (K)", "Celsius (C)", "Fahrenheit (F)"])
 
     st.divider()
@@ -283,8 +309,21 @@ with st.sidebar.form(key="pipeline_config_form"):
     submit_button = st.form_submit_button(label="Run Pipeline", width='content')
 
 if submit_button:
-    run_pipeline(df_raw, col_pdb, col_mut, col_aff_wt, col_aff_mut,
-                 col_temp, check_temp, z_thresh, iso_contam, mad_floor)
+    # Validate that every required column has been selected (selectboxes start
+    # empty for uploaded CSVs, so a None here means the user skipped one).
+    _missing = [name for name, val in (
+        ("PDB Column", col_pdb),
+        ("Mutation Column", col_mut),
+        ("Wild-Type Affinity Column", col_aff_wt),
+        ("Mutant Affinity Column", col_aff_mut),
+        ("Temperature Column", col_temp),
+    ) if val is None]
+    
+    if _missing:
+        st.error(f"Please select a value for: {', '.join(_missing)}")
+    else:
+        run_pipeline(df_raw, col_pdb, col_mut, col_aff_wt, col_aff_mut,
+                     col_temp, check_temp, z_thresh, iso_contam, mad_floor)
 
 # --- Automatic run for the example dataset (default QC parameters) ---
 if st.session_state.get("auto_run"):
@@ -315,24 +354,58 @@ if "df_qc" not in st.session_state:
 if 'df_qc' in st.session_state:
     # Important variables
     df_qc = st.session_state['df_qc']
+    col_pdb = st.session_state.get('sel_pdb') # st.session_state.get('col_pdb') or
     col_mut = st.session_state['col_mut']
     col_aff_wt = st.session_state.get('col_aff_wt')
     col_aff_mut = st.session_state.get('col_aff_mut')
+    col_temp = st.session_state.get('col_temp')
 
     tab1, tab2 = st.tabs(["Dataset Metrics & Table", "3D Structural Viewer"])
 
     # Processed dataset
     with tab1:
         st.subheader("Processed Dataset")
+        
+        # Build the column list shown in the table:
+        #   - The 5 columns selected in the sidebar (PDB, Mutation, WT/Mut affinity, Temperature)
+        #   - The new columns calculated during preprocessing & QC (see CALCULATED_COLS)
+        # `temp_assumed` is intentionally excluded from both the table and the processed-dataset download below.
+        display_cols = []
+        for c in [col_pdb, col_mut, col_aff_wt, col_aff_mut, col_temp] + CALCULATED_COLS:
+            if c and c in df_qc.columns and c not in display_cols:
+                display_cols.append(c)
+        df_qc_display = df_qc[display_cols] if display_cols else df_qc
 
         # --- Paginated table ---
-        total_rows = len(df_qc)
+        total_rows = len(df_qc_display)
         page_count = max(1, math.ceil(total_rows / PAGE_SIZE))
         page = st.pagination(page_count, key="dataset_page")  # Pages are 1-indexed
         start = (page - 1) * PAGE_SIZE
         end = min(start + PAGE_SIZE, total_rows)
         st.caption(f"Showing rows {start + 1:,}–{end:,} of {total_rows:,} · page {page} of {page_count}")
-        st.dataframe(df_qc.iloc[start:end], width='stretch')
+        st.dataframe(df_qc_display.iloc[start:end], width='stretch')
+        
+        # --- Download buttons ---
+        st.caption("Download datasets:")
+        dl_col1, dl_col2 = st.columns(2)
+        with dl_col1:
+            st.download_button(
+                label="⬇ Download original dataset",
+                data=df_raw.to_csv(index=False).encode('utf-8'),
+                file_name="original_dataset.csv",
+                mime="text/csv",
+                width='stretch',
+            )
+        with dl_col2:
+            # Full processed dataset (all columns) but without `temp_assumed`
+            df_qc_download = df_qc.drop(columns=['temp_assumed'], errors='ignore')
+            st.download_button(
+                label="⬇ Download processed dataset (all columns)",
+                data=df_qc_download.to_csv(index=False).encode('utf-8'),
+                file_name="processed_dataset.csv",
+                mime="text/csv",
+                width='stretch',
+            )
 
         st.divider()
 
@@ -420,29 +493,32 @@ if 'df_qc' in st.session_state:
             # Options
             with col_options:
                 st.subheader("Appearance & Styling")
-                
-                selected_style = st.selectbox(
-                    "Main representation:",
-                    ["Cartoon", "Spheres", "Sticks", "Ribbon Trace"]
-                )
-                bg_color = st.selectbox("Canvas background:", ["White", "Dark"])
 
-                color_scheme = st.selectbox(
-                    "Protein color scheme:",
-                    ["Chain ID", "Secondary Structure", "N-to-C Spectrum", "B-Factor"]
-                )
-                show_surface = st.checkbox("Overlay molecular surface", value=False)
+                opt_col1, opt_col2 = st.columns(2)
 
-                highlight_color = st.color_picker("Mutation highlight color:", "#FF007F")
-                mut_repr = st.selectbox(
-                    "Mutation site representation:",
-                    ["Sticks & Spheres", "Spheres Only", "Sticks Only"]
-                )
+                with opt_col1:
+                    st.caption("Structure")
+                    selected_style = st.selectbox(
+                        "Main representation:",
+                        ["Cartoon", "Spheres", "Sticks", "Ribbon Trace"]
+                    )
+                    color_scheme = st.selectbox(
+                        "Color scheme:",
+                        ["Chain ID", "Secondary Structure", "N-to-C Spectrum", "B-Factor"]
+                    )
+                    bg_color = st.selectbox("Canvas background:", ["White", "Dark"])
+                    show_surface = st.checkbox("Surface overlay:", value=False)
 
-                st.markdown("---")
-                show_neighbors = st.checkbox("Highlight 5Å radius neighbors", value=False)
-                neighbor_radius = st.slider("Radius (Å):", 3.0, 10.0, 5.0, 0.5)
-                neighbor_color = st.color_picker("Neighbor residue color:", "#00E5FF")
+                with opt_col2:
+                    st.caption("Mutation & neighbors")
+                    mut_repr = st.selectbox(
+                        "Site representation:",
+                        ["Sticks & Spheres", "Spheres Only", "Sticks Only"]
+                    )
+                    highlight_color = st.color_picker("Highlight color:", "#FF007F")
+                    show_neighbors = st.checkbox("Highlight neighbors:", value=False)
+                    neighbor_radius = st.slider("Radius (Å):", 3.0, 10.0, 5.0, 0.5)
+                    neighbor_color = st.color_picker("Neighbor color:", "#00E5FF")
 
             # 3D viewer
             with col_viewer:
