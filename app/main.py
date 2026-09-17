@@ -43,6 +43,53 @@ DEFAULT_QC_PARAMS = {
 # Rows per page in the processed-dataset table
 PAGE_SIZE = 10
 
+# CSS for the first-page upload control. It turns the file uploader into a
+# button that matches the primary "Load example dataset" button, renames its
+# default "Upload" label to "Upload local CSV", and keeps the uploader's own
+# size hint ("200MB per file • CSV") underneath.
+START_UPLOADER_STYLE = """
+<style>
+.st-key-start_uploader [data-testid="stFileUploaderDropzone"] {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 0.25rem !important;
+    padding: 0 !important;
+    border: none !important;
+    background: transparent !important;
+    min-height: 0 !important;
+}
+.st-key-start_uploader [data-testid="stFileUploaderDropzone"] > div {
+    width: 100% !important;
+}
+.st-key-start_uploader [data-testid="stFileUploaderDropzone"] button {
+    width: 100% !important;
+    min-height: 2.5rem !important;
+    background-color: #FF4B4B !important;
+    border: 1px solid #FF4B4B !important;
+    color: #FFFFFF !important;
+}
+/* Hide Streamlit's built-in upload icon + "Upload" text ... */
+.st-key-start_uploader [data-testid="stFileUploaderDropzone"] button * {
+    font-size: 0 !important;
+}
+/* ... and replace it with our own label (14px = the primary button label size). */
+.st-key-start_uploader [data-testid="stFileUploaderDropzone"] button [data-testid="stMarkdownContainer"] p::after {
+    content: "Upload local CSV";
+    font-size: 0.875rem !important;
+}
+.st-key-start_uploader [data-testid="stFileUploaderDropzone"] button:hover {
+    background-color: #E63E3E !important;
+    border-color: #E63E3E !important;
+    color: #FFFFFF !important;
+}
+.st-key-start_uploader [data-testid="stFileUploaderDropzoneInstructions"] {
+    align-self: center !important;
+    text-align: center !important;
+}
+</style>
+"""
+
 # Columns created by the pipeline (preprocessing + QC). Shown next to the 5
 # sidebar-selected columns in the processed-dataset table.
 CALCULATED_COLS = [
@@ -174,6 +221,7 @@ def run_pipeline(df_raw, col_pdb, col_mut, col_aff_wt, col_aff_mut, col_temp,
 
 # --- "GET STARTED" SCREEN (only while no dataset is loaded) ---
 if st.session_state["df_raw"] is None:
+    st.markdown(START_UPLOADER_STYLE, unsafe_allow_html=True)
     st.title("👋 Welcome to BioData")
 
     with st.container(border=True):
@@ -204,25 +252,28 @@ if st.session_state["df_raw"] is None:
                 load_example_dataset()
 
         with col_btn2:
-            if st.button("Upload local CSV", width="stretch"):
-                st.session_state["data_mode"] = "upload"
-                st.rerun()
+            # The uploader *is* the action: clicking it opens the file picker
+            # directly. START_UPLOADER_STYLE styles it like the primary button
+            # on the left (that style also provides the visible label text).
+            uploaded_file = st.file_uploader(
+                "Upload local CSV",
+                type=["csv"],
+                key="start_uploader",
+                label_visibility="collapsed",
+            )
 
-    if st.session_state["data_mode"] == "upload":
-        uploaded_file = st.file_uploader("Upload your CSV dataset", type=["csv"])
+    if uploaded_file is not None:
+        try:
+            st.session_state["df_raw"] = read_csv_file(uploaded_file)
+            st.session_state["data_mode"] = "upload"
 
-        if uploaded_file is not None:
-            try:
-                st.session_state["df_raw"] = read_csv_file(uploaded_file)
-                st.session_state["data_mode"] = "upload"
+            for sel_key in SKEMPI_COLUMNS:
+                st.session_state.pop(sel_key, None)
+            clear_results()
 
-                for sel_key in SKEMPI_COLUMNS:
-                    st.session_state.pop(sel_key, None)
-                clear_results()
-                
-                st.rerun()
-            except Exception as e:
-                st.error(f"Could not read the CSV file: {e}")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Could not read the CSV file: {e}")
 
     st.stop()
 
@@ -236,7 +287,7 @@ with st.sidebar:
     st.title("Data Source")
 
     new_file = st.file_uploader(
-        "Upload a new CSV (replaces the current dataset)",
+        f"Upload a new CSV (max 200 MB) (replaces the current dataset)",
         type=["csv"],
         key="sidebar_uploader",
     )
@@ -372,7 +423,9 @@ if 'df_qc' in st.session_state:
     col_aff_mut = st.session_state.get('col_aff_mut')
     col_temp = st.session_state.get('col_temp')
 
-    tab1, tab2 = st.tabs(["Dataset Metrics & Table", "3D Structural Viewer"])
+    # `key` persists the active tab in session state, so widget interactions
+    # inside a tab (e.g. changing the mutation) no longer snap back to tab 1.
+    tab1, tab2 = st.tabs(["Dataset Metrics & Table", "3D Structural Viewer"], key="main_tabs")
 
     # Processed dataset
     with tab1:
@@ -458,21 +511,22 @@ if 'df_qc' in st.session_state:
     
     # 3D viewer
     with tab2:
-        st.header("3D Macromolecular Structure Viewer")
+        st.header("3D Structure & Mutation Analysis")
 
         available_pdbs = sorted(df_qc['PDB_ID'].dropna().unique())
 
         if available_pdbs:
-            # PDB & Mutation Selectors
-            c1, c2 = st.columns(2)
-            with c1:
-                selected_pdb = st.selectbox("1. Select PDB Complex:", available_pdbs)
+            # --- SELECTION ---
+            st.subheader("Selection")
+            sel_col1, sel_col2 = st.columns(2)
+            with sel_col1:
+                selected_pdb = st.selectbox("1. Select PDB Complex:", available_pdbs, key="tab2_pdb")
 
             pdb_subset = df_qc[df_qc['PDB_ID'] == selected_pdb]
             available_muts = sorted(pdb_subset[col_mut].dropna().unique())
 
-            with c2:
-                selected_mutation = st.selectbox("2. Select Mutation:", available_muts)
+            with sel_col2:
+                selected_mutation = st.selectbox("2. Select Mutation:", available_muts, key="tab2_mut")
 
             # Metadata info bar
             mut_row = pdb_subset[pdb_subset[col_mut] == selected_mutation].iloc[0]
@@ -499,69 +553,69 @@ if 'df_qc' in st.session_state:
 
             st.divider()
 
-            # --- 3D VIEWER (LEFT) AND APPEARANCE CONTROLS (RIGHT) ---
-            col_viewer, col_options = st.columns([3, 2])
-            
-            # Options
-            with col_options:
-                st.subheader("Appearance & Styling")
+            # --- CANVAS (LEFT) + APPEARANCE CONTROLS (RIGHT) ---
+            viewer_col, controls_col = st.columns([1.2, 1])
 
+            with controls_col:
+                st.subheader("Appearance & Styling Controls")
                 opt_col1, opt_col2 = st.columns(2)
 
                 with opt_col1:
                     st.caption("Structure")
                     selected_style = st.selectbox(
                         "Main representation:",
-                        ["Cartoon", "Spheres", "Sticks", "Ribbon Trace"]
+                        ["Cartoon", "Spheres", "Sticks", "Ribbon Trace"],
+                        key="tab2_style"
                     )
                     color_scheme = st.selectbox(
                         "Color scheme:",
-                        ["Chain ID", "Secondary Structure", "N-to-C Spectrum", "B-Factor"]
+                        ["Chain ID", "Secondary Structure", "N-to-C Spectrum", "B-Factor"],
+                        key="tab2_color"
                     )
-                    bg_color = st.selectbox("Canvas background:", ["White", "Dark"])
-                    show_surface = st.checkbox("Surface overlay:", value=False)
+                    bg_color = st.selectbox("Canvas background:", ["White", "Dark"], key="tab2_bg")
+                    show_surface = st.checkbox("Surface overlay:", value=False, key="tab2_surface")
 
                 with opt_col2:
                     st.caption("Mutation & neighbors")
                     mut_repr = st.selectbox(
                         "Site representation:",
-                        ["Sticks & Spheres", "Spheres Only", "Sticks Only"]
+                        ["Sticks & Spheres", "Spheres Only", "Sticks Only"],
+                        key="tab2_mut_repr"
                     )
-                    highlight_color = st.color_picker("Highlight color:", "#FF007F")
-                    show_neighbors = st.checkbox("Highlight neighbors:", value=False)
-                    neighbor_radius = st.slider("Radius (Å):", 3.0, 10.0, 5.0, 0.5)
-                    neighbor_color = st.color_picker("Neighbor color:", "#00E5FF")
+                    highlight_color = st.color_picker("Highlight color:", "#FF007F", key="tab2_hl_col")
+                    show_neighbors = st.checkbox("Highlight neighbors:", value=False, key="tab2_neigh")
+                    neighbor_radius = st.slider("Radius (Å):", 3.0, 10.0, 5.0, 0.5, key="tab2_radius")
+                    neighbor_color = st.color_picker("Neighbor color:", "#00E5FF", key="tab2_neigh_col")
 
-            # 3D viewer
-            with col_viewer:
-                with st.spinner(f"Fetching and rendering 3D structure for {selected_pdb}..."):
-                    success, pdb_block_or_error = render_wt_structure_highlight(
-                        pdb_id=selected_pdb,  # pyright: ignore[reportArgumentType]
-                        mutation_str=selected_mutation,  # pyright: ignore[reportArgumentType]
-                        style_type=selected_style,
-                        color_scheme=color_scheme,
-                        highlight_color=highlight_color,
-                        mut_repr=mut_repr,
-                        bg_color=bg_color,
-                        show_surface=show_surface,
-                        show_neighbors=show_neighbors,
-                        neighbor_radius=neighbor_radius,
-                        neighbor_color=neighbor_color,
-                        width=650,
-                        height=520
-                    )
-                
-                if success:
-                    st.caption(f"Fetched successfully from RCSB PDB API ({selected_pdb})")
+            with viewer_col:
+                st.subheader("Wild-Type Structure")
+
+                success_wt, wt_data = render_wt_structure_highlight(
+                    pdb_id=selected_pdb,  # pyright: ignore[reportArgumentType]
+                    mutation_str=selected_mutation,  # pyright: ignore[reportArgumentType]
+                    style_type=selected_style,
+                    color_scheme=color_scheme,
+                    highlight_color=highlight_color,
+                    mut_repr=mut_repr,
+                    bg_color=bg_color,
+                    show_surface=show_surface,
+                    show_neighbors=show_neighbors,
+                    neighbor_radius=neighbor_radius,
+                    neighbor_color=neighbor_color,
+                    width=560,
+                    height=460
+                )
+
+                if success_wt:
                     st.download_button(
-                        label=f"Download {selected_pdb} PDB file",
-                        data=pdb_block_or_error,
-                        file_name=f"{selected_pdb}.pdb",
+                        label="Download WT PDB",
+                        data=wt_data,
+                        file_name=f"{selected_pdb}_wt.pdb",
                         mime="chemical/x-pdb",
-                        width='content'
+                        key="dl_wt"
                     )
                 else:
-                    st.error(pdb_block_or_error)
+                    st.error(wt_data)
 
         else:
             st.warning("No valid 4-character PDB IDs found in the dataset.")
