@@ -1,3 +1,4 @@
+import datetime
 import io
 import math
 import re
@@ -24,6 +25,46 @@ from utils import (
 
 # SKEMPI url (example)
 SKEMPI_URL = "https://life.bsc.es/pid/skempi2/database/download/skempi_v2.csv"
+
+# Placeholder contact links: replace with the real profiles.
+GITHUB_URL = "https://github.com/manaves"
+LINKEDIN_URL = "https://www.linkedin.com/in/maria-navarro-paredes/"
+REPO_URL = "https://github.com/manaves/BioData-QC"
+
+# Citation shown on the welcome page for the SKEMPI v2.0 dataset.
+SKEMPI_CITATION = (
+    "Justina Jankauskaitė, Brian Jiménez-García, Justas Dapkūnas, Juan Fernández-Recio, Iain H Moal,"
+    "SKEMPI 2.0: an updated benchmark of changes in protein–protein binding energy, kinetics and"
+    "thermodynamics upon mutation, *Bioinformatics, Volume 35, Issue 3, February 2019, Pages 462–469,"
+    "https://doi.org/10.1093/bioinformatics/bty635"
+)
+
+# Brand-icon links for the upper-right corner. `st.link_button` only supports
+# Material/emoji icons, so these are plain anchors with inline SVG logos.
+SOCIAL_LINKS_STYLE = """
+<style>
+.social-links { display: flex; gap: 0.5rem; justify-content: flex-end; flex-wrap: nowrap; }
+.social-links a {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 2.25rem; height: 2.25rem; border-radius: 50%;
+    background: #ffffff; border: 1px solid #d1d5db; color: #374151;
+    text-decoration: none; transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.social-links a:hover { background: #111827; border-color: #111827; color: #ffffff; }
+.social-links a svg { width: 1.15rem; height: 1.15rem; fill: currentColor; }
+</style>
+"""
+
+SOCIAL_LINKS_HTML = f"""
+<div class="social-links">
+  <a href="{GITHUB_URL}" target="_blank" rel="noopener noreferrer" title="GitHub" aria-label="GitHub">
+    <svg viewBox="0 0 16 16" role="img" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+  </a>
+  <a href="{LINKEDIN_URL}" target="_blank" rel="noopener noreferrer" title="LinkedIn" aria-label="LinkedIn">
+    <svg viewBox="0 0 24 24" role="img" aria-hidden="true"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 0 1-2.063-2.065 2.064 2.064 0 1 1 2.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.225 0z"/></svg>
+  </a>
+</div>
+"""
 
 # Hardcoded SKEMPI v2 column mapping.
 # The keys match the `key=` of the column selectboxes in the sidebar form.
@@ -128,6 +169,12 @@ st.logo(
     icon_image=LOGO_PATH
 )
 
+# --- TOP-RIGHT CONTACT LINKS ---
+# Placeholder GitHub/LinkedIn links; update GITHUB_URL / LINKEDIN_URL above.
+_social_spacer, _social_col = st.columns([8, 1.5], vertical_alignment="center")
+with _social_col:
+    st.markdown(SOCIAL_LINKS_STYLE + SOCIAL_LINKS_HTML, unsafe_allow_html=True)
+
 # --- Session state initialization ---
 if "df_raw" not in st.session_state:
     st.session_state["df_raw"] = None
@@ -152,6 +199,21 @@ def read_csv_file(file) -> pd.DataFrame:
     except Exception:
         file.seek(0)
         return pd.read_csv(file, sep=",")
+
+
+def render_footer():
+    """Render the page footer: copyright, license and repository link."""
+    year = datetime.date.today().year
+    st.markdown(
+        f"""
+        <div style="margin-top:2.5rem;padding-top:1rem;border-top:1px solid #e5e7eb;
+                    text-align:center;font-size:0.8rem;color:#6b7280;">
+            © {year} BioData · Licensed under the MIT License ·
+            <a href="{REPO_URL}" target="_blank" rel="noopener noreferrer">Source code on GitHub</a>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def load_example_dataset():
@@ -264,6 +326,13 @@ if st.session_state["df_raw"] is None:
                 label_visibility="collapsed",
             )
 
+        st.divider()
+        st.markdown(
+            "**Citation**  \n"
+            "If you use the SKEMPI v2.0 dataset, please cite:  \n"
+            f"{SKEMPI_CITATION}"
+        )
+
     if uploaded_file is not None:
         try:
             st.session_state["df_raw"] = read_csv_file(uploaded_file)
@@ -277,6 +346,7 @@ if st.session_state["df_raw"] is None:
         except Exception as e:
             st.error(f"Could not read the CSV file: {e}")
 
+    render_footer()
     st.stop()
 
 
@@ -665,3 +735,7 @@ if 'df_qc' in st.session_state:
 
         else:
             st.warning("No valid 4-character PDB IDs found in the dataset.")
+
+
+# --- PAGE FOOTER ---
+render_footer()
