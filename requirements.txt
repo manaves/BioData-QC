@@ -9,3 +9,7 @@ stmol==0.0.9
 requests==2.34.2
 altair==6.2.2
 pyarrow==24.0.0
+ipywidgets==7.6.3
+ipython==9.17.1
+ipython-genutils==0.2.0
+traitlets==5.16.1
