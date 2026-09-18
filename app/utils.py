@@ -1,5 +1,8 @@
 import re
+import html
+import math
 import py3Dmol
+import datetime
 import pandas as pd
 import urllib.request
 from stmol import showmol
@@ -85,16 +88,34 @@ def _build_scheme_spec(color_scheme: str, pdb_block: str):
         return 'ssJmol' #'ssPyMOL'
     return 'chain'
 
+# In-process cache of successfully downloaded PDB blocks, so Streamlit reruns
+# caused by viewer interactions do not re-download the same file. Bounded FIFO;
+# failures are intentionally not cached so a transient error can be retried.
+_PDB_CACHE: dict = {}
+_PDB_CACHE_MAX = 32
+
+
+def _cache_pdb_block(clean_id: str, block: str) -> None:
+    if clean_id not in _PDB_CACHE and len(_PDB_CACHE) >= _PDB_CACHE_MAX:
+        _PDB_CACHE.pop(next(iter(_PDB_CACHE)))
+    _PDB_CACHE[clean_id] = block
+
+
 def fetch_pdb_from_web(pdb_id: str):
     """
-    Fetch PDB structure from RSCB DB.
+    Fetch PDB structure from RCSB DB, reusing an in-process cache when possible.
     """
     clean_id = str(pdb_id).strip().upper()[:4]
+    cached = _PDB_CACHE.get(clean_id)
+    if cached is not None:
+        return cached, f"RCSB PDB Web API ({clean_id}, cached)"
     rcsb_url = f"https://files.rcsb.org/download/{clean_id}.pdb"
     try:
-        req = urllib.request.Request(rcsb_url, headers={'User-Agent': 'StreamlitBioApp/1.0'})
+        req = urllib.request.Request(rcsb_url, headers={"User-Agent": "StreamlitBioApp/1.0"})
         with urllib.request.urlopen(req, timeout=10) as response:
-            return response.read().decode('utf-8'), f"RCSB PDB Web API ({clean_id})"
+            block = response.read().decode("utf-8")
+        _cache_pdb_block(clean_id, block)
+        return block, f"RCSB PDB Web API ({clean_id})"
     except Exception as e:
         return None, f"Could not retrieve PDB '{clean_id}' from RCSB PDB API. Error: {str(e)}"
 
@@ -128,6 +149,105 @@ def parse_mutation_info(mutation_str: str):
             })
     return parsed
 
+def _residue_center(pdb_block: str, chain, resnum, icode: str = ""):
+    """
+    Return the (x, y, z) centroid of the atoms of one residue in a PDB block.
+
+    Coordinates come from columns 31-54 of ATOM/HETATM records. Returns None
+    when the residue is not found or has no parseable coordinates, so callers
+    can skip the flash animation instead of guessing a position.
+    """
+    xs, ys, zs = [], [], []
+    for line in pdb_block.splitlines():
+        if not line.startswith(("ATOM", "HETATM")) or len(line) < 54:
+            continue
+        if (line[21].strip() or "A") != str(chain).strip():
+            continue
+        try:
+            if int(line[22:26]) != int(resnum):
+                continue
+        except (TypeError, ValueError):
+            continue
+        if line[26].strip() != (icode or ""):
+            continue
+        try:
+            xs.append(float(line[30:38]))
+            ys.append(float(line[38:46]))
+            zs.append(float(line[46:54]))
+        except ValueError:
+            continue
+
+    if not xs:
+        return None
+    return sum(xs) / len(xs), sum(ys) / len(ys), sum(zs) / len(zs)
+
+
+def _neighborhood_spec(res_spec: dict, radius: float) -> dict:
+    """Selection spec for residues within `radius` Å of `res_spec` (by residue)."""
+    return {
+        'within': {
+            'distance': radius,
+            'sel': res_spec,
+            'byres': True
+        }
+    }
+
+
+def _add_flash_animation(
+    view,
+    pdb_block: str,
+    res_spec: dict,
+    center=None,
+    flash_color: str = "#FFD400",
+    flash_radius: float = 1.8,
+    flashes: int = 6,
+    interval_ms: int = 320
+):
+    """
+    Inject JavaScript that pulses a translucent sphere over `res_spec`.
+
+    3Dmol.js has no built-in flash method (checked against 2.5.5), so the
+    animation alternates addSphere/removeShape with setInterval and ends with
+    the sphere removed. It runs after the model styles are applied because the
+    code is prepended to `view.endjs`, i.e. inside the load promise.
+
+    `center` may be supplied by the caller to avoid re-scanning the PDB block;
+    when omitted it is derived from `res_spec`. If the residue cannot be found,
+    nothing is injected.
+    """
+    if center is None:
+        center = _residue_center(
+            pdb_block,
+            res_spec.get("chain"),
+            res_spec.get("resi"),
+            res_spec.get("icode", ""),
+        )
+    if center is None:
+        return
+
+    cx, cy, cz = center
+    js = (
+        "(function() {\n"
+        f"  var center = {{x: {cx}, y: {cy}, z: {cz}}};\n"
+        f"  var opts = {{center: center, radius: {flash_radius}, "
+        f"color: '{flash_color}', opacity: 0.55}};\n"
+        "  var handle = null, ticks = 0;\n"
+        "  var timer = setInterval(function() {\n"
+        "    if (handle) { viewer_UNIQUEID.removeShape(handle); handle = null; }\n"
+        "    else { handle = viewer_UNIQUEID.addSphere(opts); }\n"
+        "    viewer_UNIQUEID.render();\n"
+        "    ticks += 1;\n"
+        f"    if (ticks >= {flashes}) {{\n"
+        "      clearInterval(timer);\n"
+        "      if (handle) { viewer_UNIQUEID.removeShape(handle); }\n"
+        "      viewer_UNIQUEID.render();\n"
+        "    }\n"
+        f"  }}, {interval_ms});\n"
+        "})();\n"
+    )
+    view.endjs = js + view.endjs
+
+
 def render_wt_structure_highlight(
     pdb_id: str, 
     mutation_str: str, 
@@ -141,10 +261,17 @@ def render_wt_structure_highlight(
     neighbor_radius=5.0,
     neighbor_color="#00E5FF",
     width=680, 
-    height=520
+    height=520,
+    focus_residue=None
 ):
     """
     Renders 3D protein structure with optional 5 Ångström neighborhood highlighting.
+
+    Parameters
+        focus_residue : dict, optional
+            Residue to center/zoom and flash, e.g. one entry from
+            parse_mutation_info ({'chain', 'resnum', 'inscode', ...}). When
+            given, it overrides the default zoom-to-first-mutation behaviour.
     """
     pdb_block, source = fetch_pdb_from_web(pdb_id)
     if not pdb_block:
@@ -169,13 +296,28 @@ def render_wt_structure_highlight(
         elif style_type == "Ribbon Trace":
             view.setStyle({}, {'line': {'colorscheme': scheme_spec, 'linewidth': 3}})
 
-        # FIX: white-on-white was invisible. A translucent gray contrasts with
-        # both canvas colors, so toggling the checkbox now has a visible effect.
         if show_surface:
             surface_color = '#909090' if bg_color == "White" else '#3d3d3d'
             view.addSurface(py3Dmol.VDW, {'opacity': 0.45, 'color': surface_color})
 
         view.addStyle({'hetflag': True}, {'stick': {'radius': 0.15}})
+
+        # Residue clicked in the Mutation Properties table, if any. Only focus
+        # it when the residue exists in this structure
+        focus_spec = None
+        focus_center = None
+        if focus_residue and focus_residue.get('chain') is not None and focus_residue.get('resnum') is not None:
+            candidate = {'chain': focus_residue['chain'], 'resi': str(focus_residue['resnum'])}
+            if focus_residue.get('inscode'):
+                candidate['icode'] = focus_residue['inscode']
+            focus_center = _residue_center(
+                pdb_block,
+                candidate.get('chain'),
+                candidate.get('resi'),
+                candidate.get('icode', ''),
+            )
+            if focus_center is not None:
+                focus_spec = candidate
 
         # Process mutation target & spatial neighborhood
         parsed_muts = parse_mutation_info(mutation_str)
@@ -193,13 +335,7 @@ def render_wt_structure_highlight(
                 # --- NEIGHBORHOOD SELECTION ---
                 neighbor_spec = None
                 if show_neighbors:
-                    neighbor_spec = {
-                        'within': {
-                            'distance': neighbor_radius,
-                            'sel': res_spec,
-                            'byres': True
-                        }
-                    }
+                    neighbor_spec = _neighborhood_spec(res_spec, neighbor_radius)
                     view.addStyle(neighbor_spec, {
                         'stick': {
                             'color': neighbor_color,
@@ -231,10 +367,19 @@ def render_wt_structure_highlight(
                     res_spec
                 )
                 
-                if not has_valid_target:
+                # Default framing: only when no table row asked for a focus.
+                if not has_valid_target and focus_spec is None:
                     zoom_spec = neighbor_spec if (show_neighbors and neighbor_spec is not None) else res_spec
                     view.zoomTo(zoom_spec)
                     has_valid_target = True
+
+        # --- TABLE-DRIVEN FOCUS: center, zoom and flash the clicked residue ---
+        if focus_spec is not None:
+            view.addStyle(focus_spec, {'stick': {'color': '#FFD400', 'radius': 0.5}})
+            zoom_spec = _neighborhood_spec(focus_spec, neighbor_radius) if show_neighbors else focus_spec
+            view.zoomTo(zoom_spec)
+            _add_flash_animation(view, pdb_block, focus_spec, center=focus_center)
+            has_valid_target = True
 
         if not has_valid_target:
             view.zoomTo()
@@ -503,3 +648,392 @@ def plot_aa_transition_matrix(df: pd.DataFrame, col_mut: str) -> go.Figure:
         color_continuous_scale="Blues",
         text_auto=True
     )
+
+
+# ---------------------------------------------------------------------------
+# Executive summary report export engine
+# ---------------------------------------------------------------------------
+
+def pdb_block_metadata(pdb_block: str) -> dict:
+    """
+    Summarize a PDB block for the report's structure metadata section.
+
+    Returns chain identifiers, residue/atom counts and the non-water ligand
+    residue names found in HETATM records. Missing/empty blocks yield zeros so
+    the report can still be generated when the structure was not fetched.
+    """
+    if not pdb_block:
+        return {"chains": [], "residue_count": 0, "atom_count": 0,
+                "hetatm_count": 0, "ligands": []}
+
+    chains, residues, ligands = set(), set(), set()
+    atom_count = hetatm_count = 0
+    for line in pdb_block.splitlines():
+        record = line[:6].strip()
+        if record == "ATOM" and len(line) >= 27:
+            atom_count += 1
+            chain = line[21].strip() or "A"
+            chains.add(chain)
+            residues.add((chain, line[22:27].strip()))
+        elif record == "HETATM":
+            hetatm_count += 1
+            ligand = line[17:20].strip()
+            if ligand and ligand not in {"HOH", "DOD", "WAT"}:
+                ligands.add(ligand)
+
+    return {
+        "chains": sorted(chains),
+        "residue_count": len(residues),
+        "atom_count": atom_count,
+        "hetatm_count": hetatm_count,
+        "ligands": sorted(ligands),
+    }
+
+
+def _report_escape(value) -> str:
+    return html.escape("" if value is None else str(value))
+
+
+def _report_number(value, digits: int = 3) -> str:
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    if math.isnan(num) or math.isinf(num):
+        return "—"
+    return f"{num:,.{digits}f}"
+
+
+def _report_definition_table(items) -> str:
+    rows = "".join(
+        f'<tr><th scope="row">{_report_escape(label)}</th>'
+        f'<td>{_report_escape(value) if value not in (None, "") else "—"}</td></tr>'
+        for label, value in items
+    )
+    return f'<table class="report-kv"><tbody>{rows}</tbody></table>'
+
+
+def _report_dataframe_table(df: pd.DataFrame, max_rows=None) -> str:
+    if df is None or df.empty:
+        return '<p class="report-empty">No data available.</p>'
+    view = df.head(max_rows) if max_rows else df
+    table = view.to_html(
+        index=False,
+        border=0,
+        classes="report-table",
+        escape=True,
+        na_rep="—",
+        float_format=lambda x: f"{x:,.3f}",
+    )
+    return f'<div class="report-table-wrap">{table}</div>'
+
+
+def _report_format_affinity(df: pd.DataFrame, cols) -> pd.DataFrame:
+    """Render molar affinity columns in scientific notation (3-decimal floats show as 0.000)."""
+    df = df.copy()
+    for col in cols:
+        if col and col in df.columns:
+            numeric = pd.to_numeric(df[col], errors="coerce")
+            df[col] = numeric.map(lambda v: "—" if pd.isna(v) else f"{v:.2e}")
+    return df
+
+
+def _report_figure(fig, include_plotlyjs: bool = False) -> str:
+    return fig.to_html(
+        full_html=False,
+        include_plotlyjs=include_plotlyjs,
+        config={"displayModeBar": False, "responsive": True},
+    )
+
+
+def _report_ddg_stats(series: pd.Series) -> dict:
+    values = pd.to_numeric(series, errors="coerce").dropna()
+    if values.empty:
+        return {}
+    std = values.std(ddof=1) if len(values) > 1 else 0.0
+    return {
+        "Records": f"{len(values):,}",
+        "Mean ΔΔG (kcal/mol)": _report_number(values.mean()),
+        "Median ΔΔG (kcal/mol)": _report_number(values.median()),
+        "Std dev (kcal/mol)": _report_number(std),
+        "Min ΔΔG (kcal/mol)": _report_number(values.min()),
+        "Max ΔΔG (kcal/mol)": _report_number(values.max()),
+    }
+
+
+_REPORT_CSS = """
+:root { color-scheme: light; }
+* { box-sizing: border-box; }
+body {
+    font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, Arial, sans-serif;
+    margin: 0; padding: 0; background: #f4f6fb; color: #1f2937;
+}
+.report { max-width: 1080px; margin: 0 auto; padding: 2.5rem 1.5rem 3rem; }
+.report-header {
+    background: linear-gradient(135deg, #4f46e5 0%, #6366f1 100%);
+    color: #fff; border-radius: 14px; padding: 1.75rem 2rem; margin-bottom: 1.75rem;
+}
+.report-header h1 { margin: 0 0 0.35rem; font-size: 1.65rem; }
+.report-header .subtitle { margin: 0; font-size: 1rem; opacity: 0.92; }
+.report-header .timestamp { margin: 0.6rem 0 0; font-size: 0.8rem; opacity: 0.8; }
+section.report-section {
+    background: #fff; border: 1px solid #e5e7eb; border-radius: 12px;
+    padding: 1.25rem 1.5rem; margin-bottom: 1.5rem;
+}
+section.report-section > h2 {
+    margin: 0 0 0.9rem; font-size: 1.1rem; color: #312e81;
+    border-bottom: 2px solid #eef2ff; padding-bottom: 0.5rem;
+}
+.report-kv { border-collapse: collapse; width: 100%; }
+.report-kv th, .report-kv td {
+    text-align: left; padding: 0.42rem 0.6rem; border-bottom: 1px solid #f1f3f9;
+    font-size: 0.88rem; vertical-align: top;
+}
+.report-kv th { width: 38%; color: #4b5563; font-weight: 600; }
+.report-kv td { color: #111827; }
+.report-table-wrap { width: 100%; max-width: 100%; overflow-x: auto; }
+table.report-table {
+    border-collapse: collapse; width: 100%; max-width: 100%;
+    table-layout: fixed; font-size: 0.8rem;
+}
+table.report-table thead th {
+    background: #eef2ff; color: #312e81; text-align: left;
+    padding: 0.45rem 0.5rem; border-bottom: 2px solid #c7d2fe;
+    white-space: normal; overflow-wrap: anywhere; word-break: break-word;
+    vertical-align: bottom;
+}
+table.report-table tbody td {
+    padding: 0.4rem 0.5rem; border-bottom: 1px solid #f1f3f9;
+    overflow-wrap: anywhere; word-break: break-word;
+    vertical-align: top;
+}
+table.report-table tbody tr:nth-child(even) { background: #fafbff; }
+.report-empty { color: #6b7280; font-size: 0.88rem; }
+.report-figure { margin: 0 0 1.1rem; }
+.report-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; }
+@media (max-width: 820px) { .report-grid { grid-template-columns: 1fr; } }
+.report-footer {
+    font-size: 0.75rem; color: #6b7280; text-align: center;
+    border-top: 1px solid #e5e7eb; padding-top: 1rem;
+}
+"""
+
+
+def build_executive_summary_report(
+    df_qc: pd.DataFrame,
+    pdb_id,
+    mutation,
+    col_mut: str,
+    col_aff_wt: str | None = None,
+    col_aff_mut: str | None = None,
+    col_temp: str | None = None,
+    pdb_block: str | None = None,
+    pdb_source: str | None = None,
+    generated_at=None,
+) -> str:
+    """
+    Bundle the current PDB metadata, ΔΔG metrics, mutation tables and key
+    plots into a single self-contained HTML executive summary.
+
+    The report is scoped to the PDB complex currently selected in the 3D
+    viewer (`pdb_id`), while still including dataset-wide QC context. It has no
+    external assets: Plotly.js is embedded once so the downloaded file renders
+    offline.
+
+    Parameters
+        df_qc : pd.DataFrame
+            Processed + QC dataframe stored in session state.
+        pdb_id : str
+            4-character PDB code of the selected complex.
+        mutation : str
+            Currently selected mutation string.
+        col_mut : str
+            Name of the mutation column.
+        col_aff_wt, col_aff_mut, col_temp : str, optional
+            Selected affinity/temperature column names, included when present.
+        pdb_block : str, optional
+            Raw PDB text used for structure metadata (chains, atoms, ligands).
+        pdb_source : str, optional
+            Human-readable provenance of the structure.
+        generated_at : datetime, optional
+            Report timestamp; defaults to the current UTC time.
+
+    Returns
+        str
+            A complete HTML document ready for `st.download_button`.
+    """
+    if generated_at is None:
+        generated_at = datetime.datetime.now(datetime.timezone.utc)
+    timestamp = generated_at.strftime("%Y-%m-%d %H:%M UTC")
+    complex_label = str(pdb_id)
+
+    df = df_qc.copy()
+    if "PDB_ID" in df.columns:
+        complex_df = df[df["PDB_ID"].astype(str) == str(pdb_id)]
+    else:
+        complex_df = df
+    if complex_df.empty:
+        complex_df = df
+
+    mut_rows = pd.DataFrame()
+    if col_mut and col_mut in complex_df.columns:
+        mut_rows = complex_df[complex_df[col_mut].astype(str) == str(mutation)]
+    mut_row = mut_rows.iloc[0] if not mut_rows.empty else None
+
+    def row_value(column):
+        if mut_row is None or not column or column not in mut_row:
+            return None
+        return mut_row[column]
+
+    # --- Structure metadata ---
+    structure = pdb_block_metadata(pdb_block) if pdb_block else None
+    metadata_items = [
+        ("PDB complex", complex_label),
+        ("Selected mutation", mutation),
+        ("Structure source", pdb_source),
+        ("ΔΔG (kcal/mol)", _report_number(row_value("ddG_kcal_mol")) if mut_row is not None else None),
+        ("QC flag", row_value("QC_Flag")),
+        ("QC reason", row_value("QC_Reason")),
+        ("Robust Z-score", _report_number(row_value("z_score")) if mut_row is not None else None),
+        ("Replicate std dev (kcal/mol)", _report_number(row_value("std_replicates")) if mut_row is not None else None),
+        ("Wild-type affinity", row_value(col_aff_wt)),
+        ("Mutant affinity", row_value(col_aff_mut)),
+        ("Temperature (raw)", row_value(col_temp)),
+        ("Temperature (K)", _report_number(row_value("Temp_K"), 2) if mut_row is not None else None),
+    ]
+    if structure is not None:
+        metadata_items.extend([
+            ("Chains", ", ".join(structure["chains"]) or None),
+            ("Residues", f"{structure['residue_count']:,}"),
+            ("Atoms (ATOM records)", f"{structure['atom_count']:,}"),
+            ("Ligands (HETATM)", ", ".join(structure["ligands"]) or "none"),
+        ])
+
+    # --- ΔΔG metrics ---
+    all_stats = _report_ddg_stats(df["ddG_kcal_mol"]) if "ddG_kcal_mol" in df.columns else {}
+    complex_stats = (
+        _report_ddg_stats(complex_df["ddG_kcal_mol"])
+        if "ddG_kcal_mol" in complex_df.columns else {}
+    )
+    metric_names = list(all_stats.keys()) or list(complex_stats.keys())
+    metrics_rows = "".join(
+        f"<tr><th scope=\"row\">{_report_escape(name)}</th>"
+        f"<td>{_report_escape(all_stats.get(name, '—'))}</td>"
+        f"<td>{_report_escape(complex_stats.get(name, '—'))}</td></tr>"
+        for name in metric_names
+    )
+    metrics_table = (
+        '<table class="report-table"><thead><tr><th>Metric</th>'
+        '<th>All records</th><th>Selected complex</th></tr></thead>'
+        f'<tbody>{metrics_rows}</tbody></table>'
+        if metrics_rows else '<p class="report-empty">No ΔΔG metrics available.</p>'
+    )
+
+    if "QC_Flag" in df.columns:
+        flag_counts = (
+            df["QC_Flag"].value_counts().rename_axis("QC flag").reset_index(name="Records")
+        )
+        qc_breakdown = _report_dataframe_table(flag_counts)
+    else:
+        qc_breakdown = '<p class="report-empty">No QC flags available.</p>'
+
+    # --- Mutation tables ---
+    complex_cols = [c for c in [
+        col_mut, col_aff_wt, col_aff_mut, "Temperature", "Temp_K",
+        "ddG_kcal_mol", "z_score", "std_replicates", "QC_Flag", "QC_Reason",
+    ] if c and c in complex_df.columns]
+    complex_mut_table = _report_dataframe_table(
+        _report_format_affinity(
+            complex_df[complex_cols].reset_index(drop=True),
+            [col_aff_wt, col_aff_mut],
+        )
+    ) if complex_cols else '<p class="report-empty">No mutation columns available.</p>'
+
+    parsed = pd.DataFrame(parse_mutation_info(str(mutation)))
+    parsed_cols = [c for c in [
+        "chain", "resnum", "wt_name", "mut_name", "wt_class",
+        "mut_class", "mw_change",
+    ] if c in parsed.columns]
+    parsed_table = _report_dataframe_table(parsed[parsed_cols]) \
+        if parsed_cols else '<p class="report-empty">No standard mutation details could be parsed.</p>'
+
+    # --- Key plots ---
+    figures = []
+    if "ddG_kcal_mol" in complex_df.columns:
+        figures.append((
+            "ΔΔG distribution (selected complex)",
+            plot_ddg_distribution(complex_df),
+        ))
+    if "z_score" in complex_df.columns:
+        figures.append((
+            "Robust Z-score vs ΔΔG (selected complex)",
+            plot_z_score(complex_df),
+        ))
+    if "iso_forest_outlier" in complex_df.columns:
+        figures.append((
+            "Isolation Forest vs ΔΔG (selected complex)",
+            plot_iso_forest_outlier(complex_df),
+        ))
+    if "QC_Flag" in df.columns:
+        figures.append(("QC flag distribution (dataset)", plot_qc_flag(df)))
+
+    figure_html_parts = []
+    for index, (title, fig) in enumerate(figures):
+        figure_html_parts.append(
+            '<div class="report-figure">'
+            f'<h3>{_report_escape(title)}</h3>'
+            f'{_report_figure(fig, include_plotlyjs=(index == 0))}'
+            "</div>"
+        )
+    figures_html = "".join(figure_html_parts) or \
+        '<p class="report-empty">No plots available.</p>'
+
+    report_title = f"BioData-QC Executive Summary — {_report_escape(complex_label)}"
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{report_title}</title>
+<style>{_REPORT_CSS}</style>
+</head>
+<body>
+<div class="report">
+    <header class="report-header">
+        <h1>BioData-QC Executive Summary</h1>
+        <p class="subtitle">Complex {_report_escape(complex_label)} · Mutation {_report_escape(mutation)}</p>
+        <p class="timestamp">Generated {_report_escape(timestamp)}</p>
+    </header>
+
+    <section class="report-section">
+        <h2>Structure &amp; Assay Metadata</h2>
+        {_report_definition_table(metadata_items)}
+    </section>
+
+    <section class="report-section">
+        <h2>Calculated ΔΔG Metrics</h2>
+        {metrics_table}
+        <h3>QC Flag Breakdown</h3>
+        {qc_breakdown}
+    </section>
+
+    <section class="report-section">
+        <h2>Mutation Tables</h2>
+        <h3>All mutations in {_report_escape(complex_label)}</h3>
+        {complex_mut_table}
+        <h3>Selected mutation events</h3>
+        {parsed_table}
+    </section>
+
+    <section class="report-section">
+        <h2>Key Plots</h2>
+        {figures_html}
+    </section>
+
+    <footer class="report-footer">
+        Generated by BioData-QC · Quality control methodology based on the
+        SKEMPI 2.0 benchmark (Jankauskaitė et al., 2019).
+    </footer>
+</div>
+</body>
+</html>"""

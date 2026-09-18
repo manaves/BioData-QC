@@ -1,5 +1,6 @@
 import io
 import math
+import re
 import requests
 import pandas as pd
 import streamlit as st
@@ -9,6 +10,7 @@ from processing import data_preprocessing, quality_control
 from utils import (
     render_wt_structure_highlight, 
     parse_mutation_info,
+    build_executive_summary_report,
     plot_z_score,
     plot_iso_forest_outlier,
     plot_std_replicates,
@@ -139,7 +141,7 @@ if "auto_run" not in st.session_state:
 def clear_results():
     """Remove previous pipeline results (and table pagination) from session state."""
     for key in ("df_qc", "col_pdb", "col_mut", "col_aff_wt", "col_aff_mut",
-                "col_temp", "dataset_page"):
+                "col_temp", "dataset_page", "exec_report"):
         st.session_state.pop(key, None)
 
 
@@ -541,13 +543,26 @@ if 'df_qc' in st.session_state:
             # --- MUTATION PROPERTIES TABLE ---
             st.subheader("Mutation Properties")
             parsed_muts = parse_mutation_info(selected_mutation)  # pyright: ignore[reportArgumentType]
+            focus_residue = None
             if parsed_muts:
                 mut_df = pd.DataFrame(parsed_muts)
-                st.dataframe(
+                mut_event = st.dataframe(
                     mut_df[['chain', 'resnum', 'wt_name', 'mut_name', 'wt_class', 'mut_class', 'mw_change']],
                     hide_index=True,
-                    width='content'
+                    width='content',
+                    on_select="rerun",
+                    selection_mode="single-row",
+                    # Key includes the mutation so the selection resets when the
+                    # user switches mutation (row indices are positional).
+                    key=f"mut_props_table::{selected_mutation}",
                 )
+                # The returned DataframeState is a TypedDict; use .get so the
+                # optional keys don't trip the type checker.
+                selection = mut_event.get("selection")
+                selected_rows = list(selection.get("rows", [])) if selection else []
+                if selected_rows and 0 <= selected_rows[0] < len(parsed_muts):
+                    focus_residue = parsed_muts[selected_rows[0]]
+                st.caption("Click a row to center, zoom and flash that residue in the 3D view.")
             else:
                 st.write("No standard mutation details could be parsed from string.")
 
@@ -603,7 +618,8 @@ if 'df_qc' in st.session_state:
                     neighbor_radius=neighbor_radius,
                     neighbor_color=neighbor_color,
                     width=560,
-                    height=460
+                    height=460,
+                    focus_residue=focus_residue
                 )
 
                 if success_wt:
@@ -616,6 +632,36 @@ if 'df_qc' in st.session_state:
                     )
                 else:
                     st.error(wt_data)
+
+                # --- EXECUTIVE SUMMARY EXPORT ---
+                st.divider()
+                report_key = f"{selected_pdb}::{selected_mutation}"
+                if st.button("Generate executive summary report", key="gen_report", width="stretch"):
+                    report_html = build_executive_summary_report(
+                        df_qc=df_qc,
+                        pdb_id=selected_pdb,
+                        mutation=selected_mutation,
+                        col_mut=col_mut,
+                        col_aff_wt=col_aff_wt,
+                        col_aff_mut=col_aff_mut,
+                        col_temp=col_temp,
+                        pdb_block=wt_data if success_wt else None,
+                        pdb_source=f"RCSB PDB Web API ({selected_pdb})" if success_wt else None,
+                    )
+                    st.session_state["exec_report"] = {"key": report_key, "html": report_html}
+
+                report = st.session_state.get("exec_report")
+                if report and report.get("key") == report_key:
+                    safe_mut = re.sub(r"[^A-Za-z0-9_-]+", "_", str(selected_mutation)).strip("_") or "mutation"
+                    st.download_button(
+                        label="⬇ Download executive summary report",
+                        data=report["html"].encode("utf-8"),
+                        file_name=f"{selected_pdb}_{safe_mut}_executive_summary.html",
+                        mime="text/html",
+                        key="dl_report",
+                    )
+                else:
+                    st.caption("Generate the report to enable the download button.")
 
         else:
             st.warning("No valid 4-character PDB IDs found in the dataset.")
