@@ -35,7 +35,7 @@ REPO_URL = "https://github.com/manaves/BioData-QC"
 SKEMPI_CITATION = (
     "Justina Jankauskaitė, Brian Jiménez-García, Justas Dapkūnas, Juan Fernández-Recio, Iain H Moal,"
     "SKEMPI 2.0: an updated benchmark of changes in protein–protein binding energy, kinetics and"
-    "thermodynamics upon mutation, *Bioinformatics, Volume 35, Issue 3, February 2019, Pages 462–469,"
+    "thermodynamics upon mutation, *Bioinformatics*, Volume 35, Issue 3, February 2019, Pages 462–469,"
     "https://doi.org/10.1093/bioinformatics/bty635"
 )
 
