@@ -221,4 +221,5 @@ __marimo__/
 .vscode/
 data/
 src/
+notebooks/
 pyrightconfig.json

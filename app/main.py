@@ -290,7 +290,7 @@ if st.session_state["df_raw"] is None:
 
     with st.container(border=True):
         st.subheader("Get started")
-        st.markdown("""
+        st.markdown(r"""
             Welcome to the **BioData Quality Control & 3D Viewer** application!
 
             This application processes thermodynamic protein binding data, executes outlier detection pipelines, 
@@ -392,7 +392,7 @@ with st.sidebar:
 
     # Instructions & column meanings, available at any time
     with st.expander("Instructions"):
-        st.markdown("""
+        st.markdown(r"""
             - Load the **SKEMPI v2** example dataset or upload your own CSV to get started.
             - Select column mappings and QC parameter thresholds in the sidebar.
             - Click **Run Pipeline** to compute thermodynamic properties and generate interactive 3D visualizations.                    
@@ -421,7 +421,7 @@ with st.sidebar.form(key="pipeline_config_form"):
                                 help="Equilibrium dissociation constant ($K_d$) of the mutant protein.")
     col_temp = st.selectbox("Temperature Column:", options=column_options, key="sel_temp",
                                 index=None, placeholder="Select a column...",
-                                help="Experimental temperature ($K$, $^\circ C$, or $^\circ F$).")
+                                help=r"Experimental temperature ($K$, $^\circ C$, or $^\circ F$).")
     check_temp = st.selectbox("Temperature scale used:", options=["Kelvin (K)", "Celsius (C)", "Fahrenheit (F)"])
 
     st.divider()
@@ -687,26 +687,39 @@ if 'df_qc' in st.session_state:
                     show_neighbors=show_neighbors,
                     neighbor_radius=neighbor_radius,
                     neighbor_color=neighbor_color,
-                    width=560,
+                    width="100%",
                     height=460,
                     focus_residue=focus_residue
                 )
 
+                report_key = f"{selected_pdb}::{selected_mutation}"
+                generate_report = False
                 if success_wt:
-                    st.download_button(
-                        label="Download WT PDB",
-                        data=wt_data,
-                        file_name=f"{selected_pdb}_wt.pdb",
-                        mime="chemical/x-pdb",
-                        key="dl_wt"
-                    )
+                    dl_col, report_col = st.columns(2)
+                    with dl_col:
+                        st.download_button(
+                            label="Download WT PDB",
+                            data=wt_data,
+                            file_name=f"{selected_pdb}_wt.pdb",
+                            mime="chemical/x-pdb",
+                            key="dl_wt",
+                            width="stretch",
+                        )
+                    with report_col:
+                        generate_report = st.button(
+                            "Generate executive summary report",
+                            key="gen_report",
+                            width="stretch",
+                        )
                 else:
                     st.error(wt_data)
 
                 # --- EXECUTIVE SUMMARY EXPORT ---
-                st.divider()
-                report_key = f"{selected_pdb}::{selected_mutation}"
-                if st.button("Generate executive summary report", key="gen_report", width="stretch"):
+                # Built lazily on demand: bundling structure metadata, ΔΔG
+                # metrics, mutation tables and plots is ~200 ms, so it is not
+                # worth doing on every viewer rerun. The report is cached in
+                # session state and invalidated when the selection changes.
+                if generate_report:
                     report_html = build_executive_summary_report(
                         df_qc=df_qc,
                         pdb_id=selected_pdb,

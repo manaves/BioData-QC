@@ -5,6 +5,7 @@ import py3Dmol
 import datetime
 import pandas as pd
 import urllib.request
+from typing import Any
 from stmol import showmol
 import plotly.express as px
 import plotly.graph_objects as go
@@ -260,7 +261,7 @@ def render_wt_structure_highlight(
     show_neighbors=False,
     neighbor_radius=5.0,
     neighbor_color="#00E5FF",
-    width=680, 
+    width: int | str | None = 680, 
     height=520,
     focus_residue=None
 ):
@@ -268,6 +269,9 @@ def render_wt_structure_highlight(
     Renders 3D protein structure with optional 5 Ångström neighborhood highlighting.
 
     Parameters
+        width : int | str | None
+            Canvas width. An int fixes the width in pixels; None (or a CSS
+            string such as "100%") makes the viewer fill its parent column.
         focus_residue : dict, optional
             Residue to center/zoom and flash, e.g. one entry from
             parse_mutation_info ({'chain', 'resnum', 'inscode', ...}). When
@@ -277,8 +281,12 @@ def render_wt_structure_highlight(
     if not pdb_block:
         return False, source
 
+    # py3Dmol turns int widths into "Npx" and passes strings through verbatim,
+    # so "100%" lets the inner viewer div track the column width. The library
+    # source is untyped (no py.typed), so Any avoids false int-only errors.
+    view_width: Any = "100%" if width is None else width
     try:
-        view = py3Dmol.view(width=width, height=height)
+        view = py3Dmol.view(width=view_width, height=height)
         view.addModel(pdb_block, 'pdb')
         
         # Canvas background
@@ -384,7 +392,10 @@ def render_wt_structure_highlight(
         if not has_valid_target:
             view.zoomTo()
 
-        showmol(view, height=height, width=width)
+        # Only a pixel width is passed to the iframe; None stretches it to the
+        # column. The inner viewer div (view_width) carries the CSS sizing.
+        frame_width: Any = width if isinstance(width, int) else None
+        showmol(view, height=height, width=frame_width)
         return True, pdb_block
 
     except Exception as e:
@@ -713,7 +724,7 @@ def _report_definition_table(items) -> str:
     return f'<table class="report-kv"><tbody>{rows}</tbody></table>'
 
 
-def _report_dataframe_table(df: pd.DataFrame, max_rows=None) -> str:
+def _report_dataframe_table(df: Any, max_rows=None) -> str:
     if df is None or df.empty:
         return '<p class="report-empty">No data available.</p>'
     view = df.head(max_rows) if max_rows else df
@@ -728,12 +739,12 @@ def _report_dataframe_table(df: pd.DataFrame, max_rows=None) -> str:
     return f'<div class="report-table-wrap">{table}</div>'
 
 
-def _report_format_affinity(df: pd.DataFrame, cols) -> pd.DataFrame:
+def _report_format_affinity(df: Any, cols) -> Any:
     """Render molar affinity columns in scientific notation (3-decimal floats show as 0.000)."""
     df = df.copy()
     for col in cols:
         if col and col in df.columns:
-            numeric = pd.to_numeric(df[col], errors="coerce")
+            numeric: Any = pd.to_numeric(df[col], errors="coerce")
             df[col] = numeric.map(lambda v: "—" if pd.isna(v) else f"{v:.2e}")
     return df
 
@@ -746,8 +757,9 @@ def _report_figure(fig, include_plotlyjs: bool = False) -> str:
     )
 
 
-def _report_ddg_stats(series: pd.Series) -> dict:
-    values = pd.to_numeric(series, errors="coerce").dropna()
+def _report_ddg_stats(series: Any) -> dict:
+    numeric: Any = pd.to_numeric(series, errors="coerce")
+    values: Any = numeric.dropna()
     if values.empty:
         return {}
     std = values.std(ddof=1) if len(values) > 1 else 0.0
@@ -867,15 +879,15 @@ def build_executive_summary_report(
     timestamp = generated_at.strftime("%Y-%m-%d %H:%M UTC")
     complex_label = str(pdb_id)
 
-    df = df_qc.copy()
+    df: Any = df_qc.copy()
     if "PDB_ID" in df.columns:
-        complex_df = df[df["PDB_ID"].astype(str) == str(pdb_id)]
+        complex_df: Any = df[df["PDB_ID"].astype(str) == str(pdb_id)]
     else:
         complex_df = df
     if complex_df.empty:
         complex_df = df
 
-    mut_rows = pd.DataFrame()
+    mut_rows: Any = pd.DataFrame()
     if col_mut and col_mut in complex_df.columns:
         mut_rows = complex_df[complex_df[col_mut].astype(str) == str(mutation)]
     mut_row = mut_rows.iloc[0] if not mut_rows.empty else None
