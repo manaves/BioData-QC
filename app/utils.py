@@ -1,3 +1,12 @@
+"""
+Shared utilities for BioData-QC.
+
+Provides the helpers used across the app: Plotly charts for the thermodynamic
+and quality-control diagnostics, py3Dmol/stmol rendering of PDB structures with
+mutation-site highlighting, mutation-string parsing, and the self-contained
+executive-summary HTML report builder.
+"""
+
 import re
 import html
 import math
@@ -120,6 +129,7 @@ def fetch_pdb_from_web(pdb_id: str):
     except Exception as e:
         return None, f"Could not retrieve PDB '{clean_id}' from RCSB PDB API. Error: {str(e)}"
 
+
 def parse_mutation_info(mutation_str: str):
     if not isinstance(mutation_str, str) or not mutation_str.strip():
         return []
@@ -149,6 +159,7 @@ def parse_mutation_info(mutation_str: str):
                 'mw_change': round(mut_info['mw'] - wt_info['mw'], 2)
             })
     return parsed
+
 
 def _residue_center(pdb_block: str, chain, resnum, icode: str = ""):
     """
@@ -257,6 +268,7 @@ def render_wt_structure_highlight(
     highlight_color="#FF007F",
     mut_repr="Sticks & Spheres",
     bg_color="White",
+    struct_opacity: float = 1.0,
     show_surface=False,
     show_neighbors=False,
     neighbor_radius=5.0,
@@ -267,15 +279,44 @@ def render_wt_structure_highlight(
 ):
     """
     Renders 3D protein structure with optional 5 Ångström neighborhood highlighting.
-
-    Parameters
+    
+    Parameters:
+        pdb_id : str
+            PDB structure ID to fetch from RCSB.
+        mutation_str : str
+            Mutation string in SKEMPI format (e.g., "A123B", "A:123B", "A123B;C456D").
+        style_type : str
+            Visualization style: "Cartoon", "Spheres", "Sticks", or "Ribbon Trace".
+        color_scheme : str
+            Coloring scheme: "Chain ID", "B-Factor", "N-to-C Spectrum", or "Secondary Structure".
+        highlight_color : str
+            Hex color for highlighting mutated residues.
+        mut_repr : str
+            Representation of mutated residues: "Sticks & Spheres", "Sticks Only", or "Spheres Only".
+        bg_color : str
+            Background color: "White" or "Black".
+        struct_opacity : float
+            Opacity of the protein structure (0.0 to 1.0).
+        show_surface : bool
+            Whether to render a semi-transparent surface around the structure.
+        show_neighbors : bool
+            Whether to highlight residues within `neighbor_radius` Å of the mutated residues.
+        neighbor_radius : float
+            Radius in Ångströms for neighborhood highlighting.
+        neighbor_color : str
+            Hex color for highlighting neighboring residues.
         width : int | str | None
-            Canvas width. An int fixes the width in pixels; None (or a CSS
-            string such as "100%") makes the viewer fill its parent column.
-        focus_residue : dict, optional
-            Residue to center/zoom and flash, e.g. one entry from
-            parse_mutation_info ({'chain', 'resnum', 'inscode', ...}). When
-            given, it overrides the default zoom-to-first-mutation behaviour.
+            Width of the viewer in pixels or "100%" for full column width. None stretches to column width.
+        height : int
+            Height of the viewer in pixels.
+        focus_residue : dict | None
+            Optional residue to focus on, with keys: 'chain', 'resnum', and optional
+            'inscode'. If provided, the viewer will center and flash this residue.
+    Returns:
+        bool
+            True if the structure was successfully rendered, False otherwise.
+        str
+            Message indicating success or the reason for failure.
     """
     pdb_block, source = fetch_pdb_from_web(pdb_id)
     if not pdb_block:
@@ -296,11 +337,11 @@ def render_wt_structure_highlight(
         scheme_spec = _build_scheme_spec(color_scheme, pdb_block)
 
         if style_type == "Cartoon":
-            view.setStyle({}, {'cartoon': {'colorscheme': scheme_spec, 'opacity': 0.85}})
+            view.setStyle({}, {'cartoon': {'colorscheme': scheme_spec, 'opacity': struct_opacity}})
         elif style_type == "Spheres":
-            view.setStyle({}, {'sphere': {'colorscheme': scheme_spec, 'scale': 0.5}})
+            view.setStyle({}, {'sphere': {'colorscheme': scheme_spec, 'scale': 0.5, 'opacity': struct_opacity}})
         elif style_type == "Sticks":
-            view.setStyle({}, {'stick': {'colorscheme': scheme_spec, 'radius': 0.2}})
+            view.setStyle({}, {'stick': {'colorscheme': scheme_spec, 'radius': 0.2, 'opacity': struct_opacity}})
         elif style_type == "Ribbon Trace":
             view.setStyle({}, {'line': {'colorscheme': scheme_spec, 'linewidth': 3}})
 
@@ -400,6 +441,7 @@ def render_wt_structure_highlight(
 
     except Exception as e:
         return False, f"3D rendering error: {str(e)}"
+
 
 def plot_z_score(df_qc: pd.DataFrame) -> go.Figure:
     """

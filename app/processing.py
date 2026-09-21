@@ -1,3 +1,17 @@
+"""
+Core data-processing and quality-control logic for BioData-QC.
+
+Exposes the two stages used by the pipeline:
+
+- ``data_preprocessing``: cleans the raw dataframe, parses the temperature
+  column (K, °C or °F, falling back to a default that is tracked in the
+  ``temp_assumed`` flag) and computes the mutation-induced binding free-energy
+  change ``ddG_kcal_mol``.
+- ``quality_control``: flags records using a robust per-complex Z-score, an
+  Isolation Forest outlier model and replicate variability, producing the
+  ``QC_Flag`` and ``QC_Reason`` columns.
+"""
+
 import numpy as np
 import pandas as pd
 import scipy.constants as const
