@@ -42,10 +42,18 @@ ABOUT_AUTHOR_STYLE = """
     background: color-mix(in srgb, var(--secondary-background-color, #808080) 25%, transparent);
 }
 .about-author__avatar {
+    position: relative; overflow: hidden;
     flex: 0 0 auto; width: 4.5rem; height: 4.5rem; border-radius: 50%;
     background: var(--primary-color, #FF4B4B); color: #ffffff;
     display: flex; align-items: center; justify-content: center;
     font-size: 1.6rem; font-weight: 600; letter-spacing: 0.02em;
+}
+.about-author__initials {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+}
+.about-author__avatar img {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    object-fit: cover; border-radius: 50%; display: block; color: transparent;
 }
 .about-author__body h3 { margin: 0 0 0.15rem 0; }
 .about-author__role { margin: 0 0 0.6rem 0; opacity: 0.65; font-size: 0.85rem; }
@@ -69,7 +77,11 @@ ABOUT_AUTHOR_STYLE = """
 
 ABOUT_AUTHOR_CARD = f"""
 <div class="about-author">
-  <div class="about-author__avatar">{INITIALS}</div>
+    <div class="about-author__avatar">
+        <span class="about-author__initials">{INITIALS}</span>
+        <img src="https://shorturl.at/xw2MI" alt="{AUTHOR_NAME}" loading="lazy" referrerpolicy="no-referrer"
+             onerror="this.style.display='none'">
+    </div>
   <div class="about-author__body">
     <h3>{AUTHOR_NAME}</h3>
     <p class="about-author__role">{AUTHOR_ROLE}</p>
