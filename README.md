@@ -6,38 +6,17 @@ BioData-QC is a Streamlit application that ingests thermodynamic protein binding
 
 ## Features
 
-- **Flexible data loading** &mdash; fetch the SKEMPI&nbsp;2.0 dataset straight from the web, or upload any CSV with automatic delimiter detection.
-- **Configurable column mapping** &mdash; map PDB, mutation, wild-type/mutant affinity and temperature columns through the sidebar; QC thresholds are tunable with live sliders.
 - **Thermodynamic calculation** &mdash; computes `ddG = R * T * ln(Kd_mut / Kd_wt)` in kcal/mol with automatic temperature parsing and unit conversion (K, &deg;C, &deg;F).
 - **Multi-signal quality control** &mdash; robust per-complex Z-scores, Isolation Forest anomaly detection, and replicate variability analysis, combined into explainable PASS / REVIEW / ANOMALY / REJECT flags.
 - **Interactive dashboard** &mdash; &Delta;&Delta;G distributions, WT-vs-mutant affinity scatter, amino-acid substitution matrices, PDB coverage and QC diagnostic plots (Plotly).
 - **3D structural viewer** &mdash; fetches structures from the RCSB PDB API and displays them with py3Dmol/stmol, with mutation-site highlighting, distance-based neighbour selection, multiple representations and color schemes.
 - **Executive summary export** &mdash; generates a self-contained HTML report with structure metadata, &Delta;&Delta;G metrics, mutation tables and key plots.
-- **Dataset export** &mdash; download the original or fully processed dataset as CSV.
 
-## Pipeline
-
-1. **Preprocessing** (`app/processing.py::data_preprocessing`)
-   - Normalises column names and parses the temperature column (defaulting to 298 K when missing, tracked in a `temp_assumed` flag).
-   - Converts affinity columns to numeric, dropping non-numeric, missing or non-positive values.
-   - Computes `ddG_kcal_mol` and removes infinite/NaN results.
-
-2. **Quality control** (`app/processing.py::quality_control`)
-   - **Robust Z-score** per PDB complex using median/MAD (with a configurable MAD floor to avoid inflated scores on low-variance groups).
-   - **Isolation Forest** for unsupervised multidimensional outlier detection.
-   - **Replicate spread** as the standard deviation of &Delta;&Delta;G for identical mutations across publications.
-   - Assigns a `QC_Flag` and human-readable `QC_Reason` per record.
-
-3. **Structural enrichment** &mdash; the 4-character `PDB_ID` is derived from the PDB column and used to fetch and render structures.
-
-### QC flags
-
-| Flag | Meaning |
-| --- | --- |
-| `PASS` | Metrics within normal ranges. |
-| `REVIEW` | Assumed/default temperature or high replicate inconsistency (std &gt; 1.5 kcal/mol). |
-| `ANOMALY` | Extreme robust Z-score or Isolation Forest outlier (possible biological hotspot or assay artifact). |
-| `REJECT` | &Delta;&Delta;G could not be computed (missing data or non-physical affinity). |
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=tRTuNolgKdg">
+    <img src="https://img.youtube.com/vi/tRTuNolgKdg/hqdefault.jpg" alt="Watch Video" width="560" />
+  </a>
+</p>
 
 ## Getting started
 
