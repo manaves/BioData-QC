@@ -12,6 +12,8 @@ BioData-QC is a Streamlit application that ingests thermodynamic protein binding
 - **3D structural viewer** &mdash; fetches structures from the RCSB PDB API and displays them with py3Dmol/stmol, with mutation-site highlighting, distance-based neighbour selection, multiple representations and color schemes.
 - **Executive summary export** &mdash; generates a self-contained HTML report with structure metadata, &Delta;&Delta;G metrics, mutation tables and key plots.
 
+Watch the demo video for more information:
+
 <p align="center">
   <a href="https://www.youtube.com/watch?v=tRTuNolgKdg">
     <img src="https://img.youtube.com/vi/tRTuNolgKdg/maxresdefault.jpg" alt="Watch Video" width="560" />
