@@ -15,8 +15,8 @@ BioData-QC is a Streamlit application that ingests thermodynamic protein binding
 Watch the demo video for more information:
 
 <p align="center">
-  <a href="https://www.youtube.com/watch?v=tRTuNolgKdg">
-    <img src="https://img.youtube.com/vi/tRTuNolgKdg/maxresdefault.jpg" alt="Watch Video" width="560" />
+  <a href="https://www.youtube.com/watch?v=TMHYZopYMJQ">
+    <img src="https://img.youtube.com/vi/TMHYZopYMJQ/maxresdefault.jpg" alt="Watch Video" width="560" />
   </a>
 </p>
 
